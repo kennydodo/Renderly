@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Flow × Rosterly",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Prompt presets and one-click saving of Google Flow images into Rosterly channels.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
@@ -11,9 +11,7 @@
     "http://127.0.0.1:8022/*",
     "http://localhost:8022/*"
   ],
-  "action": {
-    "default_popup": "popup.html"
-  },
+  "action": {},
   "background": {
     "service_worker": "background.js"
   },

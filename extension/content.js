@@ -1,5 +1,5 @@
 ﻿const DOCK_ID = "rosterly-dock";
-const DOCK_VERSION = "1.8.0";
+const DOCK_VERSION = "1.9.0";
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 
 const PRESETS = [
@@ -18,7 +18,6 @@ const PRESETS = [
 
 let lastFlowImage = null;
 let observer = null;
-let debounceTimer = null;
 let templates = [];
 let cards = []; // {id, text, refs: [{label, localFile}]}
 let cardSeq = 0;
@@ -448,6 +447,19 @@ async function uploadRefAsset(channelId, ref, index) {
 function buildDock() {
   if (document.getElementById(DOCK_ID)) return;
 
+  // Scrollbar styling for the cards list.
+  if (!document.getElementById(`${DOCK_ID}-style`)) {
+    const style = document.createElement("style");
+    style.id = `${DOCK_ID}-style`;
+    style.textContent = [
+      `#${DOCK_ID} .cards::-webkit-scrollbar { width: 8px; }`,
+      `#${DOCK_ID} .cards::-webkit-scrollbar-track { background: transparent; }`,
+      `#${DOCK_ID} .cards::-webkit-scrollbar-thumb { background: #5f6368; border-radius: 4px; }`,
+      `#${DOCK_ID} .cards::-webkit-scrollbar-thumb:hover { background: #80868b; }`,
+    ].join("\n");
+    document.head.appendChild(style);
+  }
+
   const dock = document.createElement("div");
   dock.id = DOCK_ID;
   dock.style.cssText = [
@@ -478,14 +490,33 @@ function buildDock() {
   title.textContent = `Rosterly for Flow v${DOCK_VERSION}`;
   title.style.cssText = "font-weight:600;letter-spacing:0.3px;";
 
+  const headerRight = document.createElement("div");
+  headerRight.style.cssText = "display:flex;gap:4px;";
+
+  const headerBtnStyle =
+    "background:#303134;color:#e8eaed;border:1px solid #5f6368;border-radius:6px;width:24px;height:24px;cursor:pointer;line-height:1;";
+
+  const gearBtn = document.createElement("button");
+  gearBtn.textContent = "⚙";
+  gearBtn.title = "Backend settings";
+  gearBtn.style.cssText = headerBtnStyle;
+
   const collapseBtn = document.createElement("button");
   collapseBtn.textContent = "–";
   collapseBtn.title = "Collapse / expand";
-  collapseBtn.style.cssText =
-    "background:#303134;color:#e8eaed;border:1px solid #5f6368;border-radius:6px;width:24px;height:24px;cursor:pointer;line-height:1;";
+  collapseBtn.style.cssText = headerBtnStyle;
+
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.title = "Close dock (reopen from the toolbar icon)";
+  closeBtn.style.cssText = headerBtnStyle;
+
+  headerRight.appendChild(gearBtn);
+  headerRight.appendChild(collapseBtn);
+  headerRight.appendChild(closeBtn);
 
   header.appendChild(title);
-  header.appendChild(collapseBtn);
+  header.appendChild(headerRight);
 
   const body = document.createElement("div");
   body.style.cssText = "display:flex;flex-direction:column;gap:8px;";
@@ -499,6 +530,36 @@ function buildDock() {
   const labelStyle = "font-size:11px;color:#9aa0a6;margin:0;";
   const smallBtnStyle =
     "background:#303134;color:#e8eaed;border:1px solid #5f6368;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;";
+
+  /* ---- backend settings row (gear) ---- */
+
+  const settingsRow = document.createElement("div");
+  settingsRow.style.cssText = "display:none;flex-direction:column;gap:4px;";
+
+  const backendLabel = document.createElement("p");
+  backendLabel.textContent = "Rosterly backend URL";
+  backendLabel.style.cssText = labelStyle;
+
+  const backendInput = document.createElement("input");
+  backendInput.placeholder = DEFAULT_BACKEND;
+  backendInput.style.cssText = selectStyle;
+
+  const backendSave = document.createElement("button");
+  backendSave.textContent = "Save URL";
+  backendSave.style.cssText = buttonStyle;
+
+  backendSave.onclick = async () => {
+    const url = backendInput.value.trim().replace(/\/+$/, "") || DEFAULT_BACKEND;
+    await chrome.storage.local.set({ backendUrl: url });
+    settingsRow.style.display = "none";
+    setStatus("Backend URL saved.");
+    templates = [];
+    refreshChannels();
+  };
+
+  settingsRow.appendChild(backendLabel);
+  settingsRow.appendChild(backendInput);
+  settingsRow.appendChild(backendSave);
 
   const channelLabel = document.createElement("p");
   channelLabel.textContent = "Rosterly channel";
@@ -555,7 +616,9 @@ function buildDock() {
   cardsLabel.style.cssText = labelStyle;
 
   const cardsBox = document.createElement("div");
-  cardsBox.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+  cardsBox.className = "cards";
+  cardsBox.style.cssText =
+    "display:flex;flex-direction:column;gap:6px;max-height:45vh;overflow-y:auto;padding-right:2px;";
 
   const autoUpscaleLabel = document.createElement("label");
   autoUpscaleLabel.style.cssText =
@@ -578,10 +641,6 @@ function buildDock() {
   stopBtn.style.cssText =
     "background:#5c1a1a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:13px;display:none;";
 
-  const importBtn = document.createElement("button");
-  importBtn.textContent = "⬇ Import last image → Rosterly";
-  importBtn.style.cssText = buttonStyle;
-
   const diagBtn = document.createElement("button");
   diagBtn.textContent = "🔍 Diagnose page";
   diagBtn.style.cssText = smallBtnStyle;
@@ -599,6 +658,14 @@ function buildDock() {
     body.style.display = hidden ? "flex" : "none";
     collapseBtn.textContent = hidden ? "–" : "+";
   };
+
+  gearBtn.onclick = async () => {
+    const open = settingsRow.style.display !== "none";
+    settingsRow.style.display = open ? "none" : "flex";
+    if (!open) backendInput.value = await getBackendBase();
+  };
+
+  closeBtn.onclick = () => dock.remove();
 
   /* ---- cards state & rendering ---- */
 
@@ -830,6 +897,9 @@ function buildDock() {
       const opt = document.createElement("option");
       opt.textContent = `Backend unreachable: ${err.message}`;
       channelSelect.appendChild(opt);
+      // Surface the gear so the user can fix the backend URL.
+      backendInput.value = await getBackendBase();
+      settingsRow.style.display = "flex";
     }
   };
 
@@ -1019,7 +1089,6 @@ function buildDock() {
 
     batchRunning = true;
     generateBtn.disabled = true;
-    importBtn.disabled = true;
     stopBtn.style.display = "block";
     let done = 0;
     try {
@@ -1041,7 +1110,6 @@ function buildDock() {
     } finally {
       batchRunning = false;
       generateBtn.disabled = false;
-      importBtn.disabled = false;
       stopBtn.style.display = "none";
     }
   };
@@ -1049,31 +1117,6 @@ function buildDock() {
   stopBtn.onclick = () => {
     batchRunning = false;
     setStatus("Stopping after the current card…");
-  };
-
-  importBtn.onclick = async () => {
-    if (!channelSelect.value) {
-      setStatus("Pick a channel first.", true);
-      return;
-    }
-    importBtn.disabled = true;
-    setStatus("Importing…");
-    scanForImages();
-    if (!lastFlowImage) {
-      setStatus("No generated image found yet — generate one in Flow first.", true);
-      importBtn.disabled = false;
-      return;
-    }
-    try {
-      const dataUrl = await imageToDataUrl(lastFlowImage);
-      const genRecord = await importToRosterly(channelSelect.value, dataUrl);
-      const label = genRecord && genRecord.name ? genRecord.name : "image";
-      setStatus(`Imported "${label}" ✓`);
-    } catch (err) {
-      setStatus(`Import failed: ${err.message}`, true);
-    } finally {
-      importBtn.disabled = false;
-    }
   };
 
   function diagnose() {
@@ -1115,13 +1158,17 @@ function buildDock() {
     if (dockMaster) masterTa.value = dockMaster;
   });
 
-  body.appendChild(channelLabel);
-  body.appendChild(channelSelect);
+  settingsRow.appendChild(backendLabel);
+  settingsRow.appendChild(backendInput);
+  settingsRow.appendChild(backendSave);
+  settingsRow.appendChild(channelLabel);
+  settingsRow.appendChild(channelSelect);
+  settingsRow.appendChild(presetLabel);
+  settingsRow.appendChild(presetSelect);
+  settingsRow.appendChild(presetBtn);
+
   body.appendChild(masterLabel);
   body.appendChild(masterTa);
-  body.appendChild(presetLabel);
-  body.appendChild(presetSelect);
-  body.appendChild(presetBtn);
   body.appendChild(pasteLabel);
   body.appendChild(pasteTa);
   body.appendChild(splitRow);
@@ -1130,11 +1177,11 @@ function buildDock() {
   body.appendChild(autoUpscaleLabel);
   body.appendChild(generateBtn);
   body.appendChild(stopBtn);
-  body.appendChild(importBtn);
   body.appendChild(diagBtn);
   body.appendChild(status);
 
   dock.appendChild(header);
+  dock.appendChild(settingsRow);
   dock.appendChild(body);
   document.body.appendChild(dock);
 
@@ -1144,32 +1191,25 @@ function buildDock() {
 
 function startObserver() {
   if (observer) return;
-  observer = new MutationObserver(() => {
-    scanForImages();
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      chrome.storage.local
-        .get("autoDock")
-        .then(({ autoDock }) => {
-          if (autoDock !== false) buildDock();
-        })
-        .catch(() => buildDock());
-    }, 400);
-  });
+  // The dock is shown only by explicit user action (toolbar icon); the
+  // observer just keeps scanning for generated images on the page.
+  observer = new MutationObserver(() => scanForImages());
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "injectDock") {
-    buildDock();
-    sendResponse({ injected: !!document.getElementById(DOCK_ID) });
-  }
-  if (msg.type === "dockStatus") {
-    sendResponse({ injected: !!document.getElementById(DOCK_ID) });
+  if (msg.type === "toggleDock") {
+    const dock = document.getElementById(DOCK_ID);
+    if (dock) {
+      dock.remove();
+      sendResponse({ visible: false });
+    } else {
+      buildDock();
+      sendResponse({ visible: !!document.getElementById(DOCK_ID) });
+    }
   }
   return false;
 });
 
 startObserver();
 scanForImages();
-buildDock();

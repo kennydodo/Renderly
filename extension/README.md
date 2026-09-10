@@ -4,21 +4,23 @@ Manifest V3 extension that bridges **Google Flow** (labs.google/fx) and your loc
 
 ## Features
 
-- **Floating dock on Flow pages** (bottom-right, collapsible):
-  - **Prompt presets + your Rosterly templates** — pick one, "Append to prompt" writes it into Flow's prompt box (works with textarea and contenteditable inputs, using React-safe native setters).
-  - **Save last image → Rosterly** — grabs the most recent generated image on the page and uploads it into the selected Rosterly channel's assets, ready to use as a reference.
-- **Popup settings**: backend URL (default `http://127.0.0.1:8022`), default channel, auto-show dock toggle.
+- **Toolbar icon toggles the dock** — click the extension icon on a Flow tab to show/hide the floating dock (bottom-right, collapsible, ✕ closes it):
+  - **Prompt presets + your Rosterly templates** — pick one, "+ Add to master" appends it to the master prompt sent with every card.
+  - **Batch cards** — paste prompts, split into cards, generate on Flow or via the Rosterly engine; results import and download automatically.
+  - **Save last image → Rosterly** — grabs the most recent generated image and imports it into the selected channel.
+  - **⚙ Backend settings** — change the backend URL if it isn't the default; opens automatically when the backend is unreachable.
+- **Default backend**: `http://127.0.0.1:8022` (changeable via the dock's ⚙ gear).
 
 ## Install (unpacked)
 
 1. Chrome → `chrome://extensions/`
 2. Enable **Developer mode** (top-right)
 3. **Load unpacked** → select this `extension/` folder
-4. Open Google Flow at https://flow.google.com (or https://labs.google/fx/tools/flow) — the dock appears bottom-right after the page loads (or use the popup's "Inject / show dock")
+4. Open Google Flow at https://flow.google.com (or https://labs.google/fx/tools/flow) and click the extension icon to show the dock
 
 ## Requirements
 
-- Rosterly backend running (`start.bat`) on `http://127.0.0.1:8022` — change it in the popup if you use a different port.
+- Rosterly backend running (`start.bat`) on `http://127.0.0.1:8022` — change it via the dock's ⚙ gear if you use a different port.
 - If you change the backend URL, reload the extension afterwards (host permissions are granted per saved URL pattern).
 
 ## Notes

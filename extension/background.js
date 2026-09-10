@@ -110,3 +110,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   })();
   return true;
 });
+
+function sendToTab(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (res) => {
+      if (chrome.runtime.lastError) {
+        void chrome.runtime.lastError;
+        resolve(null);
+      } else {
+        resolve(res);
+      }
+    });
+  });
+}
+
+// Toolbar icon toggles the dock on the active Flow tab.
+chrome.action.onClicked.addListener(async (tab) => {
+  if (
+    !tab?.id ||
+    !tab.url ||
+    !(
+      tab.url.startsWith("https://flow.google.com") ||
+      tab.url.startsWith("https://labs.google/fx")
+    )
+  ) {
+    return;
+  }
+  let res = await sendToTab(tab.id, { type: "toggleDock" });
+  if (res) return;
+
+  // Content script not loaded (stale tab) — inject it and retry.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["content.js"],
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    await sendToTab(tab.id, { type: "toggleDock" });
+  } catch {
+    /* page not injectable — nothing to do */
+  }
+});
