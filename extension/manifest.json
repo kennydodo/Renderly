@@ -7,7 +7,6 @@
   "host_permissions": [
     "https://labs.google/*",
     "https://flow.google.com/*",
-    "https://*.google.com/*",
     "https://*.googleusercontent.com/*",
     "http://127.0.0.1:8022/*",
     "http://localhost:8022/*"
