@@ -99,6 +99,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (msg.type === "focusPage") {
+        // Programmatic prompt insertion fails while the window is unfocused.
+        const tab = sender && sender.tab;
+        if (tab && tab.windowId !== undefined) {
+          try {
+            await chrome.windows.update(tab.windowId, { focused: true });
+          } catch {
+            /* window may be gone */
+          }
+        }
+        if (tab && tab.id !== undefined) {
+          try {
+            await chrome.tabs.update(tab.id, { active: true });
+          } catch {
+            /* ignore */
+          }
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
       console.warn("Rosterly extension: unknown message type", msg && msg.type);
       sendResponse({ ok: false, error: `Unknown message type: ${msg && msg.type}` });
     } catch (err) {

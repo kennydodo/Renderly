@@ -20,6 +20,7 @@ let lastFlowImage = null;
 let observer = null;
 let templates = [];
 let cards = []; // {id, text, refs: [{label, localFile}]}
+let masterRefs = []; // global references applied to every card
 let cardSeq = 0;
 let batchRunning = false;
 
@@ -109,11 +110,27 @@ function setPromptText(input, text) {
         ? window.HTMLTextAreaElement.prototype
         : window.HTMLInputElement.prototype;
     const valueSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-    if (valueSetter) valueSetter.call(input, text);
-    else input.value = text;
-    input.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
-    return input.value === text;
+    const apply = () => {
+      if (valueSetter) valueSetter.call(input, text);
+      else input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+    };
+    apply();
+    // React-controlled inputs may normalize the value (e.g. trim) — accept that.
+    if ((input.value || "").trim() === text.trim()) return true;
+    // Fallback: select-all + insertText for inputs that ignore value setters.
+    try {
+      if (input.select) input.select();
+      if (document.execCommand("insertText", false, text)) {
+        apply();
+        return (input.value || "").trim() === text.trim();
+      }
+    } catch {
+      /* ignore */
+    }
+    apply();
+    return (input.value || "").trim() === text.trim();
   }
 
   const doc = input.ownerDocument;
@@ -129,9 +146,40 @@ function setPromptText(input, text) {
   } catch {
     ok = false;
   }
-  if (!ok) input.textContent = text;
+  if (!(ok && (input.textContent || "").includes(text.slice(0, 40)))) {
+    // Rich editors (Slate, Lexical, ProseMirror) listen for beforeinput:
+    // if they cancel it they perform the insertion themselves.
+    let handled = false;
+    try {
+      handled = !input.dispatchEvent(
+        new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: text,
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+    if (!handled) {
+      // Synthetic events trigger no default action — insert manually.
+      input.textContent = text;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true }));
+    }
+  }
   input.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true }));
   return (input.textContent || "").includes(text.slice(0, 40));
+}
+
+// Re-check whether the prompt text made it into Flow's box — editor state
+// can settle asynchronously after the initial insertion.
+function promptFilled(input, prompt) {
+  if (!input) return false;
+  const needle = prompt.trim().slice(0, 40);
+  if (!needle) return false;
+  const value = input.value !== undefined ? String(input.value) : "";
+  return value.includes(needle) || String(input.textContent || "").includes(needle);
 }
 
 function triggerGenerate(input) {
@@ -413,6 +461,18 @@ function safeFileName(name) {
   return cleaned || "image";
 }
 
+// Persisted upscale factor for the auto-upscale step (2× default, 3×/4× optional).
+async function getUpscaleScale() {
+  try {
+    const { upscaleScale } = await chrome.storage.local.get("upscaleScale");
+    const n = Number(upscaleScale);
+    if (n >= 2 && n <= 4) return n;
+  } catch {
+    /* fall through to default */
+  }
+  return 2;
+}
+
 function urlToDataUrl(url) {
   return fetchImageAsBlob(url).then(fileToDataUrl);
 }
@@ -515,6 +575,9 @@ function buildDock() {
       `#${DOCK_ID} .card-actions { display:flex; gap:6px; }`,
       `#${DOCK_ID} .chip-btn { background:#303134; color:#c7cad1; border:1px solid rgba(255,255,255,0.08); border-radius:999px; padding:3px 10px; font-size:11px; cursor:pointer; transition:background .15s ease, border-color .15s ease, color .15s ease; }`,
       `#${DOCK_ID} .chip-btn:hover { background:#3c4043; border-color:rgba(138,180,248,0.4); color:#e8eaed; }`,
+      `#${DOCK_ID} .chip-btn.retry-btn { color:#81c995; border-color:rgba(52,168,83,0.5); }`,
+      `#${DOCK_ID} .chip-btn.retry-btn:hover { background:rgba(52,168,83,0.12); border-color:#34a853; color:#81c995; }`,
+      `#${DOCK_ID} .chip-btn.retry-btn:disabled { opacity:0.6; cursor:default; }`,
       `#${DOCK_ID} .ref-strip { display:flex; flex-wrap:wrap; gap:4px; }`,
       `#${DOCK_ID} .ref-chip { display:inline-flex; align-items:center; gap:4px; background:#303134; border:1px solid rgba(255,255,255,0.08); border-radius:999px; padding:2px 6px 2px 2px; font-size:10px; color:#e8eaed; max-width:150px; }`,
       `#${DOCK_ID} .ref-chip img { width:18px; height:18px; border-radius:999px; object-fit:cover; flex:none; background:#202124; }`,
@@ -644,6 +707,124 @@ function buildDock() {
   masterTa.placeholder = "e.g. Warm 2D editorial illustration, Japanese rural setting —";
   masterTa.style.cssText = textareaStyle;
 
+  /* ---- global (master) reference images ---- */
+
+  let masterPickerOpen = false;
+
+  const masterRefsRow = document.createElement("div");
+  masterRefsRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;";
+
+  const masterRefBtn = document.createElement("button");
+  masterRefBtn.className = "chip-btn";
+  masterRefBtn.textContent = "＋ Global images";
+  masterRefBtn.title =
+    "Reference images used by EVERY card — all cards are then generated by the Rosterly engine";
+  masterRefBtn.onclick = () => {
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.accept = "image/png,image/jpeg,image/webp";
+    fileInput.onchange = () => {
+      Array.from(fileInput.files || []).forEach((file) => {
+        masterRefs.push({ label: file.name, localFile: file });
+      });
+      renderMasterRefs();
+      if (masterRefs.length) {
+        setStatus("Global references set — every card will generate via the Rosterly engine.");
+      }
+    };
+    fileInput.click();
+  };
+
+  const masterFlowBtn = document.createElement("button");
+  masterFlowBtn.className = "chip-btn";
+  masterFlowBtn.textContent = "🖼 From Flow";
+  masterFlowBtn.title = "Pick visible Flow images as global references";
+  masterFlowBtn.onclick = () => {
+    scanForImages();
+    masterPickerOpen = !masterPickerOpen;
+    renderMasterRefs();
+  };
+
+  masterRefsRow.appendChild(masterRefBtn);
+  masterRefsRow.appendChild(masterFlowBtn);
+
+  const masterRefStrip = document.createElement("div");
+  masterRefStrip.className = "ref-strip";
+
+  const masterPicker = document.createElement("div");
+  masterPicker.className = "picker";
+  masterPicker.style.display = "none";
+
+  const renderMasterRefs = () => {
+    if (!Array.isArray(masterRefs)) masterRefs = [];
+    masterRefBtn.textContent = `＋ Global images${masterRefs.length ? ` · ${masterRefs.length}` : ""}`;
+    masterRefStrip.innerHTML = "";
+    masterRefs.forEach((ref, i) => {
+      const chip = document.createElement("span");
+      chip.className = "ref-chip";
+      const thumb = document.createElement("img");
+      thumb.src = refThumbUrl(ref);
+      thumb.alt = "";
+      chip.appendChild(thumb);
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "ref-name";
+      nameSpan.textContent = ref.label;
+      nameSpan.title = ref.label;
+      chip.appendChild(nameSpan);
+      const rm = document.createElement("button");
+      rm.textContent = "✕";
+      rm.title = "Remove this global reference";
+      rm.onclick = () => {
+        revokeRef(ref);
+        masterRefs.splice(i, 1);
+        renderMasterRefs();
+      };
+      chip.appendChild(rm);
+      masterRefStrip.appendChild(chip);
+    });
+
+    masterPicker.innerHTML = "";
+    if (masterPickerOpen) {
+      masterPicker.style.display = "flex";
+      const flowImgs = deepQueryAll("img")
+        .filter(
+          (img) =>
+            !isOurElement(img) &&
+            img.complete &&
+            img.naturalWidth >= 512 &&
+            (img.currentSrc || img.src)
+        )
+        .map((img) => ({ src: img.currentSrc || img.src }))
+        .reverse()
+        .slice(0, 12);
+      if (!flowImgs.length) {
+        const span = document.createElement("span");
+        span.className = "hint";
+        span.textContent = "No Flow images visible — generate something first.";
+        masterPicker.appendChild(span);
+      }
+      flowImgs.forEach((imgInfo) => {
+        const selected = masterRefs.some((r) => r.url === imgInfo.src);
+        const th = document.createElement("img");
+        th.src = imgInfo.src;
+        th.title = `Flow image — click to ${selected ? "remove" : "attach"} as global reference`;
+        if (selected) th.className = "sel";
+        th.onclick = () => {
+          if (selected) {
+            masterRefs = masterRefs.filter((r) => r.url !== imgInfo.src);
+          } else {
+            masterRefs.push({ label: "Flow image", url: imgInfo.src });
+          }
+          renderMasterRefs();
+        };
+        masterPicker.appendChild(th);
+      });
+    } else {
+      masterPicker.style.display = "none";
+    }
+  };
+
   const presetSelect = document.createElement("select");
   presetSelect.style.cssText = selectStyle;
 
@@ -755,6 +936,7 @@ function buildDock() {
       if (!Array.isArray(card.refs)) card.refs = [];
       const cardEl = document.createElement("div");
       cardEl.className = "card";
+      cardEl.dataset.cardId = card.id;
 
       const top = document.createElement("div");
       top.className = "card-top";
@@ -926,6 +1108,50 @@ function buildDock() {
     }
   };
 
+  // Failed cards get a "↻ Retry" chip that re-runs just that card.
+  const removeRetryButton = (card) => {
+    const cardEl = cardsBox.querySelector(`.card[data-card-id="${card.id}"]`);
+    if (cardEl) {
+      const btn = cardEl.querySelector(".retry-btn");
+      if (btn) btn.remove();
+    }
+  };
+
+  const addRetryButton = (card) => {
+    const cardEl = cardsBox.querySelector(`.card[data-card-id="${card.id}"]`);
+    if (!cardEl || cardEl.querySelector(".retry-btn")) return;
+    const actions = cardEl.querySelector(".card-actions");
+    if (!actions) return;
+    const btn = document.createElement("button");
+    btn.className = "chip-btn retry-btn";
+    btn.textContent = "↻ Retry";
+    btn.title = "Run this card again";
+    btn.onclick = async () => {
+      if (batchRunning) {
+        setStatus("Another run is in progress — wait for it to finish.", true);
+        return;
+      }
+      batchRunning = true;
+      generateBtn.disabled = true;
+      btn.disabled = true;
+      btn.textContent = "↻ Retrying…";
+      try {
+        await runCard(card, cards.indexOf(card), cards.length);
+        btn.remove();
+        setStatus(`Retry succeeded — "${card.displayName || `card ${card.id}`}" ✓`);
+      } catch (err) {
+        setCardStatus(card.id, `✕ ${err.message}`, true);
+        setStatus(`Retry failed: ${err.message}`, true);
+        btn.disabled = false;
+        btn.textContent = "↻ Retry";
+      } finally {
+        batchRunning = false;
+        generateBtn.disabled = false;
+      }
+    };
+    actions.appendChild(btn);
+  };
+
   const refreshPresets = async () => {
     presetSelect.innerHTML = "";
     PRESETS.forEach(([label, text]) => {
@@ -1006,18 +1232,34 @@ function buildDock() {
 
   addCardBtn.onclick = () => addCard("");
 
-  // Generate a card through the Rosterly engine: upload refs as channel
-  // assets, run a single generation, then upscale/download like the Flow path.
+  // Upload a ref once per channel and cache the asset id on the ref object —
+  // global refs are uploaded a single time no matter how many cards run.
+  const ensureUploadedId = async (channelId, ref, index) => {
+    if (ref._assetId && ref._assetChannel === channelId) return ref._assetId;
+    const id = await uploadRefAsset(channelId, ref, index);
+    ref._assetId = id;
+    ref._assetChannel = channelId;
+    return id;
+  };
+
+  // Generate a card through the Rosterly engine: upload global + card refs as
+  // channel assets, run a single generation, then upscale/download like the Flow path.
   const runEngineCard = async (card, index, total, prompt, cardName, cardPrompt) => {
-    setCardStatus(card.id, "Uploading references…");
+    const uploadTotal = masterRefs.length + card.refs.length;
     const assetIds = [];
-    for (let i = 0; i < card.refs.length; i++) {
-      setCardStatus(card.id, `Uploading ref ${i + 1}/${card.refs.length}…`);
-      assetIds.push(await uploadRefAsset(channelSelect.value, card.refs[i], i));
+    let uploadIdx = 0;
+    for (const ref of masterRefs) {
+      setCardStatus(card.id, `Uploading global ref ${++uploadIdx}/${uploadTotal}…`);
+      assetIds.push(await ensureUploadedId(channelSelect.value, ref, uploadIdx - 1));
     }
+    for (const ref of card.refs) {
+      setCardStatus(card.id, `Uploading ref ${++uploadIdx}/${uploadTotal}…`);
+      assetIds.push(await ensureUploadedId(channelSelect.value, ref, uploadIdx - 1));
+    }
+    const uniqueAssetIds = [...new Set(assetIds)];
 
     setCardStatus(card.id, "Generating via Rosterly engine…");
-    const body = { prompt, asset_ids: assetIds };
+    const body = { prompt, asset_ids: uniqueAssetIds };
     if (cardName) body.name = cardName;
     const gen = await backendJson(`/api/channels/${channelSelect.value}/generate`, {
       method: "POST",
@@ -1035,7 +1277,7 @@ function buildDock() {
         const up = await backendJson(`/api/generations/${gen.id}/upscale`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scale: 2 }),
+          body: JSON.stringify({ scale: await getUpscaleScale() }),
         });
         label = `${up.name} (${up.image_size})`;
         const base = await getBackendBase();
@@ -1065,10 +1307,10 @@ function buildDock() {
     const prompt = m && cardPrompt ? `${m} ${cardPrompt}` : cardPrompt || m;
     card.displayName = cardName;
 
-    // Cards with attached reference images bypass Flow's UI entirely:
-    // refs are uploaded to Rosterly and passed to the engine as asset_ids,
-    // so "every image added is automatically referenced" — no pasting.
-    if (card.refs.length > 0) {
+    // Cards with attached references — their own or global ones — bypass
+    // Flow's UI entirely: refs are uploaded to Rosterly and passed to the
+    // engine as asset_ids, so "every image added is automatically referenced".
+    if (card.refs.length > 0 || masterRefs.length > 0) {
       return runEngineCard(card, index, total, prompt, cardName, cardPrompt);
     }
 
@@ -1077,16 +1319,37 @@ function buildDock() {
     setCardStatus(card.id, "Filling prompt…");
     const input = getPromptInput();
     if (!input) throw new Error("Flow's prompt box not found (run Diagnose)");
-    const filled = setPromptText(input, prompt);
+    // Flow's box rejects programmatic insertion while the window is unfocused.
+    try {
+      await sendToBackground({ type: "focusPage" });
+    } catch {
+      /* ignore */
+    }
+    let filled = setPromptText(input, prompt);
     if (!filled) {
-      const copied = await copyTextToClipboard(prompt);
-      await waitForContinue(
-        `Card ${index + 1}: Flow blocked insertion. ` +
-          (copied
-            ? "The prompt is on your clipboard — paste it (Ctrl+V) in Flow's box, "
-            : "Copy the prompt manually and paste it in Flow's box, ") +
-          `then click Continue.`
-      );
+      // One retry after a short pause — focus/DOM can settle late.
+      await sleep(400);
+      filled = setPromptText(getPromptInput() || input, prompt);
+    }
+    if (!filled) {
+      // Editor state can settle asynchronously — re-check before giving up.
+      await sleep(600);
+      filled = promptFilled(getPromptInput() || input, prompt);
+    }
+    if (!filled) {
+      const { pasteDialog } = await chrome.storage.local.get("pasteDialog");
+      if (pasteDialog === true) {
+        const copied = await copyTextToClipboard(prompt);
+        await waitForContinue(
+          `Card ${index + 1}: Flow blocked insertion. ` +
+            (copied
+              ? "The prompt is on your clipboard — paste it (Ctrl+V) in Flow's box, "
+              : "Copy the prompt manually and paste it in Flow's box, ") +
+            `then click Continue.`
+        );
+      } else {
+        setCardStatus(card.id, "⚠ Auto-fill failed — Flow may reuse its previous prompt");
+      }
     }
 
     const before = captureImageSet();
@@ -1122,7 +1385,7 @@ function buildDock() {
         const up = await backendJson(`/api/generations/${genRecord.id}/upscale`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scale: 2 }),
+          body: JSON.stringify({ scale: await getUpscaleScale() }),
         });
         label = `${up.name} (${up.image_size})`;
         const base = await getBackendBase();
@@ -1171,8 +1434,10 @@ function buildDock() {
         try {
           await runCard(usable[i], i, usable.length);
           done++;
+          removeRetryButton(usable[i]);
         } catch (err) {
           setCardStatus(usable[i].id, `✕ ${err.message}`, true);
+          addRetryButton(usable[i]);
         }
         await sleep(1500);
       }
@@ -1237,15 +1502,63 @@ function buildDock() {
     presetSelect,
     presetBtn,
   ]);
+
+  const scaleSelect = document.createElement("select");
+  scaleSelect.style.cssText = selectStyle;
+  ["2", "3", "4"].forEach((s) => {
+    const opt = document.createElement("option");
+    opt.value = s;
+    opt.textContent = `${s}×`;
+    scaleSelect.appendChild(opt);
+  });
+  scaleSelect.onchange = async () => {
+    await chrome.storage.local.set({ upscaleScale: Number(scaleSelect.value) });
+    autoUpscaleText.textContent = `Auto-upscale ${scaleSelect.value}× + download each result (local GPU)`;
+    setStatus(`Upscale target set to ${scaleSelect.value}×.`);
+  };
+  chrome.storage.local.get("upscaleScale").then(({ upscaleScale }) => {
+    const s = Number(upscaleScale) || 2;
+    scaleSelect.value = String(s);
+    autoUpscaleText.textContent = `Auto-upscale ${s}× + download each result (local GPU)`;
+  });
+  const scaleSetting = buildSettingItem("Auto-upscale target", scaleSelect);
+
+  const pasteCheckLabel = document.createElement("label");
+  pasteCheckLabel.style.cssText =
+    "display:flex;align-items:center;gap:6px;font-size:12px;color:#e8eaed;cursor:pointer;";
+  const pasteCheck = document.createElement("input");
+  pasteCheck.type = "checkbox";
+  pasteCheck.onchange = async () => {
+    await chrome.storage.local.set({ pasteDialog: pasteCheck.checked });
+    setStatus(
+      pasteCheck.checked
+        ? "Paste dialog enabled for failed fills."
+        : "Paste dialog disabled — failed fills are skipped with a warning."
+    );
+  };
+  pasteCheckLabel.appendChild(pasteCheck);
+  const pasteCheckText = document.createElement("span");
+  pasteCheckText.textContent = "Show paste dialog when auto-fill fails";
+  pasteCheckLabel.appendChild(pasteCheckText);
+  chrome.storage.local.get("pasteDialog").then(({ pasteDialog }) => {
+    pasteCheck.checked = pasteDialog === true;
+  });
+  const pasteSetting = buildSettingItem("Prompt fill fallback", pasteCheckLabel);
+
   const diagSetting = buildSettingItem("Diagnose page", diagBtn);
 
   settingsRow.appendChild(backendSetting.wrap);
   settingsRow.appendChild(channelSetting.wrap);
   settingsRow.appendChild(presetSetting.wrap);
+  settingsRow.appendChild(scaleSetting.wrap);
+  settingsRow.appendChild(pasteSetting.wrap);
   settingsRow.appendChild(diagSetting.wrap);
 
   body.appendChild(masterLabel);
   body.appendChild(masterTa);
+  body.appendChild(masterRefsRow);
+  body.appendChild(masterRefStrip);
+  body.appendChild(masterPicker);
   body.appendChild(pasteLabel);
   body.appendChild(pasteTa);
   body.appendChild(splitRow);
@@ -1262,6 +1575,7 @@ function buildDock() {
   document.body.appendChild(dock);
 
   renderCards();
+  renderMasterRefs();
   refreshChannels();
 }
 
