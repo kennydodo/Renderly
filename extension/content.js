@@ -473,6 +473,29 @@ async function getUpscaleScale() {
   return 2;
 }
 
+// How many versions each card generates (1-4).
+async function getCardVersions() {
+  try {
+    const { cardVersions } = await chrome.storage.local.get("cardVersions");
+    const n = Number(cardVersions);
+    if (n >= 1 && n <= 4) return n;
+  } catch {
+    /* fall through to default */
+  }
+  return 1;
+}
+
+// Aspect ratio for engine-generated cards (Flow-path cards use Flow's own setting).
+async function getAspectRatio() {
+  try {
+    const { aspectRatio } = await chrome.storage.local.get("aspectRatio");
+    if (["16:9", "4:3", "1:1", "3:4", "9:16"].includes(aspectRatio)) return aspectRatio;
+  } catch {
+    /* fall through to default */
+  }
+  return "16:9";
+}
+
 function urlToDataUrl(url) {
   return fetchImageAsBlob(url).then(fileToDataUrl);
 }
@@ -1258,47 +1281,67 @@ function buildDock() {
     }
     const uniqueAssetIds = [...new Set(assetIds)];
 
-    setCardStatus(card.id, "Generating via Rosterly engine…");
-    const body = { prompt, asset_ids: uniqueAssetIds };
-    if (cardName) body.name = cardName;
-    const gen = await backendJson(`/api/channels/${channelSelect.value}/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (gen.status !== "done" || !gen.image_url) {
-      throw new Error(gen.error || "Generation failed in Rosterly");
-    }
-    let label = gen.name || cardName || "image";
-
-    if (autoUpscaleCheck.checked) {
-      setCardStatus(card.id, "Upscaling (local GPU)…");
-      try {
-        const up = await backendJson(`/api/generations/${gen.id}/upscale`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scale: await getUpscaleScale() }),
-        });
-        label = `${up.name} (${up.image_size})`;
-        const base = await getBackendBase();
-        const res = await fetch(new URL(up.image_url, base).href);
-        downloadBlob(await res.blob(), `${safeFileName(label)}.png`);
-        setCardStatus(card.id, `✓ ${label} — downloaded`);
-        return label;
-      } catch (err) {
-        setCardStatus(card.id, `Upscale skipped (${err.message})`);
+    const versions = await getCardVersions();
+    const ratio = await getAspectRatio();
+    const gens = [];
+    for (let v = 0; v < versions; v++) {
+      setCardStatus(
+        card.id,
+        versions > 1
+          ? `Generating ${v + 1}/${versions} via Rosterly engine…`
+          : "Generating via Rosterly engine…"
+      );
+      const body = { prompt, asset_ids: uniqueAssetIds, aspect_ratio: ratio };
+      if (cardName) body.name = cardName;
+      const gen = await backendJson(`/api/channels/${channelSelect.value}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (gen.status !== "done" || !gen.image_url) {
+        throw new Error(gen.error || "Generation failed in Rosterly");
       }
+      gens.push(gen);
     }
 
-    try {
-      const base = await getBackendBase();
-      const res = await fetch(new URL(gen.image_url, base).href);
-      downloadBlob(await res.blob(), `${safeFileName(label)}.png`);
-    } catch {
-      /* the image stays in Rosterly's gallery */
+    const labels = [];
+    for (let v = 0; v < gens.length; v++) {
+      const gen = gens[v];
+      let label = gen.name || cardName || "image";
+      const suffix = gens.length > 1 ? `-v${v + 1}` : "";
+      if (autoUpscaleCheck.checked) {
+        setCardStatus(
+          card.id,
+          gens.length > 1 ? `Upscaling ${v + 1}/${gens.length}…` : "Upscaling (local GPU)…"
+        );
+        try {
+          const up = await backendJson(`/api/generations/${gen.id}/upscale`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scale: await getUpscaleScale() }),
+          });
+          label = `${up.name} (${up.image_size})`;
+          const base = await getBackendBase();
+          const res = await fetch(new URL(up.image_url, base).href);
+          downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
+          labels.push(label);
+          continue;
+        } catch (err) {
+          setCardStatus(card.id, `Upscale skipped (${err.message})`);
+        }
+      }
+
+      try {
+        const base = await getBackendBase();
+        const res = await fetch(new URL(gen.image_url, base).href);
+        downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
+      } catch {
+        /* the image stays in Rosterly's gallery */
+      }
+      labels.push(label);
     }
-    setCardStatus(card.id, `✓ ${label} — done`);
-    return label;
+    setCardStatus(card.id, `✓ ${labels.length} image(s) — done`);
+    return labels.join(", ");
   };
 
   const runCard = async (card, index, total) => {
@@ -1316,96 +1359,104 @@ function buildDock() {
 
     setCardStatus(card.id, "Preparing…");
 
-    setCardStatus(card.id, "Filling prompt…");
-    const input = getPromptInput();
-    if (!input) throw new Error("Flow's prompt box not found (run Diagnose)");
-    // Flow's box rejects programmatic insertion while the window is unfocused.
-    try {
-      await sendToBackground({ type: "focusPage" });
-    } catch {
-      /* ignore */
-    }
-    let filled = setPromptText(input, prompt);
-    if (!filled) {
-      // One retry after a short pause — focus/DOM can settle late.
-      await sleep(400);
-      filled = setPromptText(getPromptInput() || input, prompt);
-    }
-    if (!filled) {
-      // Editor state can settle asynchronously — re-check before giving up.
-      await sleep(600);
-      filled = promptFilled(getPromptInput() || input, prompt);
-    }
-    if (!filled) {
-      const { pasteDialog } = await chrome.storage.local.get("pasteDialog");
-      if (pasteDialog === true) {
-        const copied = await copyTextToClipboard(prompt);
+    const versions = await getCardVersions();
+    const labels = [];
+    for (let v = 0; v < versions; v++) {
+      const suffix = versions > 1 ? `-v${v + 1}` : "";
+      const versionLabel = versions > 1 ? ` (${v + 1}/${versions})` : "";
+
+      setCardStatus(card.id, "Filling prompt…");
+      const input = getPromptInput();
+      if (!input) throw new Error("Flow's prompt box not found (run Diagnose)");
+      // Flow's box rejects programmatic insertion while the window is unfocused.
+      try {
+        await sendToBackground({ type: "focusPage" });
+      } catch {
+        /* ignore */
+      }
+      let filled = setPromptText(input, prompt);
+      if (!filled) {
+        // One retry after a short pause — focus/DOM can settle late.
+        await sleep(400);
+        filled = setPromptText(getPromptInput() || input, prompt);
+      }
+      if (!filled) {
+        // Editor state can settle asynchronously — re-check before giving up.
+        await sleep(600);
+        filled = promptFilled(getPromptInput() || input, prompt);
+      }
+      if (!filled) {
+        const { pasteDialog } = await chrome.storage.local.get("pasteDialog");
+        if (pasteDialog === true) {
+          const copied = await copyTextToClipboard(prompt);
+          await waitForContinue(
+            `Card ${index + 1}: Flow blocked insertion. ` +
+              (copied
+                ? "The prompt is on your clipboard — paste it (Ctrl+V) in Flow's box, "
+                : "Copy the prompt manually and paste it in Flow's box, ") +
+              `then click Continue.`
+          );
+        } else {
+          setCardStatus(card.id, "⚠ Auto-fill failed — Flow may reuse its previous prompt");
+        }
+      }
+
+      const before = captureImageSet();
+      await sleep(500);
+      const gen = triggerGenerate(input);
+      if (!gen.clicked) {
         await waitForContinue(
-          `Card ${index + 1}: Flow blocked insertion. ` +
-            (copied
-              ? "The prompt is on your clipboard — paste it (Ctrl+V) in Flow's box, "
-              : "Copy the prompt manually and paste it in Flow's box, ") +
+          `Card ${index + 1}: no Generate button found — press Flow's Generate yourself, ` +
             `then click Continue.`
         );
-      } else {
-        setCardStatus(card.id, "⚠ Auto-fill failed — Flow may reuse its previous prompt");
       }
-    }
 
-    const before = captureImageSet();
-    await sleep(500);
-    const gen = triggerGenerate(input);
-    if (!gen.clicked) {
-      await waitForContinue(
-        `Card ${index + 1}: no Generate button found — press Flow's Generate yourself, ` +
-          `then click Continue.`
+      setCardStatus(card.id, `Waiting for Flow…${versionLabel}`);
+      const img = await waitForNewImage(before, 240000, (secs) =>
+        setCardStatus(card.id, `Waiting… ${secs}s left${versionLabel}`)
       );
-    }
+      if (!img) throw new Error("timed out waiting for the image");
+      lastFlowImage = img;
 
-    setCardStatus(card.id, "Waiting for Flow…");
-    const img = await waitForNewImage(before, 240000, (secs) =>
-      setCardStatus(card.id, `Waiting… ${secs}s left`)
-    );
-    if (!img) throw new Error("timed out waiting for the image");
-    lastFlowImage = img;
+      setCardStatus(card.id, "Importing to Rosterly…");
+      const dataUrl = await imageToDataUrl(img);
+      const genRecord = await importToRosterly(
+        channelSelect.value,
+        dataUrl,
+        cardName,
+        cardPrompt || "Generated in Google Flow"
+      );
+      let label = genRecord && genRecord.name ? genRecord.name : cardName || "flow-image";
 
-    setCardStatus(card.id, "Importing to Rosterly…");
-    const dataUrl = await imageToDataUrl(img);
-    const genRecord = await importToRosterly(
-      channelSelect.value,
-      dataUrl,
-      cardName,
-      cardPrompt || "Generated in Google Flow"
-    );
-    let label = genRecord && genRecord.name ? genRecord.name : cardName || "flow-image";
-
-    if (autoUpscaleCheck.checked) {
-      setCardStatus(card.id, "Upscaling (local GPU)…");
-      try {
-        const up = await backendJson(`/api/generations/${genRecord.id}/upscale`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scale: await getUpscaleScale() }),
-        });
-        label = `${up.name} (${up.image_size})`;
-        const base = await getBackendBase();
-        const res = await fetch(new URL(up.image_url, base).href);
-        downloadBlob(await res.blob(), `${safeFileName(label)}.png`);
-        setCardStatus(card.id, `✓ ${label} — downloaded`);
-        return label;
-      } catch (err) {
-        setCardStatus(card.id, `Upscale skipped (${err.message})`);
+      if (autoUpscaleCheck.checked) {
+        setCardStatus(card.id, `Upscaling (local GPU)…${versionLabel}`);
+        try {
+          const up = await backendJson(`/api/generations/${genRecord.id}/upscale`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scale: await getUpscaleScale() }),
+          });
+          label = `${up.name} (${up.image_size})`;
+          const base = await getBackendBase();
+          const res = await fetch(new URL(up.image_url, base).href);
+          downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
+          labels.push(label);
+          continue;
+        } catch (err) {
+          setCardStatus(card.id, `Upscale skipped (${err.message})`);
+        }
       }
-    }
 
-    try {
-      const blob = await fetchImageAsBlob(img.currentSrc || img.src);
-      downloadBlob(blob, `${safeFileName(label)}.png`);
-    } catch {
-      /* gallery copy still exists */
+      try {
+        const blob = await fetchImageAsBlob(img.currentSrc || img.src);
+        downloadBlob(blob, `${safeFileName(label)}${suffix}.png`);
+      } catch {
+        /* gallery copy still exists */
+      }
+      labels.push(label);
     }
-    setCardStatus(card.id, `✓ ${label} — done`);
-    return label;
+    setCardStatus(card.id, `✓ ${labels.length} image(s) — done`);
+    return labels.join(", ");
   };
 
   generateBtn.onclick = async () => {
@@ -1521,6 +1572,40 @@ function buildDock() {
     scaleSelect.value = String(s);
     autoUpscaleText.textContent = `Auto-upscale ${s}× + download each result (local GPU)`;
   });
+  const versionsSelect = document.createElement("select");
+  versionsSelect.style.cssText = selectStyle;
+  ["1", "2", "3", "4"].forEach((s) => {
+    const opt = document.createElement("option");
+    opt.value = s;
+    opt.textContent = `${s} version${s === "1" ? "" : "s"} per card`;
+    versionsSelect.appendChild(opt);
+  });
+  versionsSelect.onchange = async () => {
+    await chrome.storage.local.set({ cardVersions: Number(versionsSelect.value) });
+    setStatus(`Each card will now generate ${versionsSelect.value} image(s).`);
+  };
+  chrome.storage.local.get("cardVersions").then(({ cardVersions }) => {
+    versionsSelect.value = String(Number(cardVersions) || 1);
+  });
+  const versionsSetting = buildSettingItem("Versions per card", versionsSelect);
+
+  const ratioSelect = document.createElement("select");
+  ratioSelect.style.cssText = selectStyle;
+  ["16:9", "4:3", "1:1", "3:4", "9:16"].forEach((r) => {
+    const opt = document.createElement("option");
+    opt.value = r;
+    opt.textContent = r;
+    ratioSelect.appendChild(opt);
+  });
+  ratioSelect.onchange = async () => {
+    await chrome.storage.local.set({ aspectRatio: ratioSelect.value });
+    setStatus(`Aspect ratio set to ${ratioSelect.value} (engine-generated cards).`);
+  };
+  chrome.storage.local.get("aspectRatio").then(({ aspectRatio }) => {
+    if (aspectRatio) ratioSelect.value = aspectRatio;
+  });
+  const ratioSetting = buildSettingItem("Aspect ratio", ratioSelect);
+
   const scaleSetting = buildSettingItem("Auto-upscale target", scaleSelect);
 
   const pasteCheckLabel = document.createElement("label");
@@ -1550,6 +1635,8 @@ function buildDock() {
   settingsRow.appendChild(backendSetting.wrap);
   settingsRow.appendChild(channelSetting.wrap);
   settingsRow.appendChild(presetSetting.wrap);
+  settingsRow.appendChild(versionsSetting.wrap);
+  settingsRow.appendChild(ratioSetting.wrap);
   settingsRow.appendChild(scaleSetting.wrap);
   settingsRow.appendChild(pasteSetting.wrap);
   settingsRow.appendChild(diagSetting.wrap);
