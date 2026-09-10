@@ -1,5 +1,5 @@
 ﻿const DOCK_ID = "rosterly-dock";
-const DOCK_VERSION = "1.9.0";
+const DOCK_VERSION = "1.9.1";
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 
 const PRESETS = [
@@ -417,6 +417,54 @@ function urlToDataUrl(url) {
   return fetchImageAsBlob(url).then(fileToDataUrl);
 }
 
+// Tiny preview thumbnails for reference chips.
+function refThumbUrl(ref) {
+  if (ref.url) return ref.url;
+  if (!ref._thumbUrl && ref.localFile) ref._thumbUrl = URL.createObjectURL(ref.localFile);
+  return ref._thumbUrl || "";
+}
+
+function revokeRef(ref) {
+  if (ref._thumbUrl) {
+    URL.revokeObjectURL(ref._thumbUrl);
+    ref._thumbUrl = null;
+  }
+}
+
+// Collapsible settings section: a ＋/－ header toggles its body.
+function buildSettingItem(title, contentEls) {
+  const wrap = document.createElement("div");
+  wrap.className = "setting";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "setting-head";
+  const plus = document.createElement("span");
+  plus.className = "plus";
+  plus.textContent = "＋";
+  const label = document.createElement("span");
+  label.textContent = title;
+  head.appendChild(plus);
+  head.appendChild(label);
+  const body = document.createElement("div");
+  body.className = "setting-body";
+  (Array.isArray(contentEls) ? contentEls : [contentEls]).forEach((el) =>
+    body.appendChild(el)
+  );
+  head.onclick = () => {
+    const open = body.classList.toggle("open");
+    plus.textContent = open ? "－" : "＋";
+  };
+  wrap.appendChild(head);
+  wrap.appendChild(body);
+  return {
+    wrap,
+    open() {
+      body.classList.add("open");
+      plus.textContent = "－";
+    },
+  };
+}
+
 // Generate via the Rosterly engine directly (used for cards with refs).
 // Reference images are uploaded to the channel and passed as asset_ids,
 // so they are guaranteed to be used — no clipboard, no manual pasting.
@@ -456,6 +504,37 @@ function buildDock() {
       `#${DOCK_ID} .cards::-webkit-scrollbar-track { background: transparent; }`,
       `#${DOCK_ID} .cards::-webkit-scrollbar-thumb { background: #5f6368; border-radius: 4px; }`,
       `#${DOCK_ID} .cards::-webkit-scrollbar-thumb:hover { background: #80868b; }`,
+      `#${DOCK_ID} .card { display:flex; flex-direction:column; gap:6px; padding:8px; border-radius:12px; background:linear-gradient(180deg,#2a2c31,#26282b); border:1px solid rgba(255,255,255,0.08); transition:border-color .15s ease, box-shadow .15s ease; }`,
+      `#${DOCK_ID} .card:hover { border-color:rgba(138,180,248,0.45); box-shadow:0 2px 10px rgba(0,0,0,0.35); }`,
+      `#${DOCK_ID} .card-top { display:flex; align-items:flex-start; gap:6px; }`,
+      `#${DOCK_ID} .card-num { flex:none; width:20px; height:20px; margin-top:5px; display:flex; align-items:center; justify-content:center; background:#0b57d0; color:#fff; font-size:11px; font-weight:600; border-radius:6px; }`,
+      `#${DOCK_ID} .card textarea { flex:1; box-sizing:border-box; background:#1e1f20; border:1px solid rgba(255,255,255,0.06); border-radius:8px; color:#e8eaed; font-size:12px; font-family:inherit; padding:6px 8px; resize:vertical; min-height:46px; transition:border-color .15s ease; }`,
+      `#${DOCK_ID} .card textarea:focus { outline:none; border-color:#8ab4f8; }`,
+      `#${DOCK_ID} .card-del { flex:none; width:24px; height:24px; border:none; background:transparent; color:#9aa0a6; border-radius:6px; cursor:pointer; font-size:13px; line-height:1; transition:background .15s ease, color .15s ease; }`,
+      `#${DOCK_ID} .card-del:hover { background:rgba(242,139,130,0.15); color:#f28b82; }`,
+      `#${DOCK_ID} .card-actions { display:flex; gap:6px; }`,
+      `#${DOCK_ID} .chip-btn { background:#303134; color:#c7cad1; border:1px solid rgba(255,255,255,0.08); border-radius:999px; padding:3px 10px; font-size:11px; cursor:pointer; transition:background .15s ease, border-color .15s ease, color .15s ease; }`,
+      `#${DOCK_ID} .chip-btn:hover { background:#3c4043; border-color:rgba(138,180,248,0.4); color:#e8eaed; }`,
+      `#${DOCK_ID} .ref-strip { display:flex; flex-wrap:wrap; gap:4px; }`,
+      `#${DOCK_ID} .ref-chip { display:inline-flex; align-items:center; gap:4px; background:#303134; border:1px solid rgba(255,255,255,0.08); border-radius:999px; padding:2px 6px 2px 2px; font-size:10px; color:#e8eaed; max-width:150px; }`,
+      `#${DOCK_ID} .ref-chip img { width:18px; height:18px; border-radius:999px; object-fit:cover; flex:none; background:#202124; }`,
+      `#${DOCK_ID} .ref-chip .ref-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:86px; }`,
+      `#${DOCK_ID} .ref-chip button { border:none; background:transparent; color:#9aa0a6; cursor:pointer; font-size:10px; padding:0 2px; }`,
+      `#${DOCK_ID} .ref-chip button:hover { color:#f28b82; }`,
+      `#${DOCK_ID} .picker { display:flex; flex-wrap:wrap; gap:4px; max-height:110px; overflow-y:auto; border:1px dashed rgba(255,255,255,0.2); border-radius:8px; padding:4px; }`,
+      `#${DOCK_ID} .picker img { width:44px; height:44px; object-fit:cover; border-radius:6px; cursor:pointer; border:2px solid transparent; }`,
+      `#${DOCK_ID} .picker img.sel { border-color:#34a853; }`,
+      `#${DOCK_ID} .picker .hint { font-size:11px; color:#9aa0a6; }`,
+      `#${DOCK_ID} .card-status { font-size:11px; color:#9aa0a6; min-height:13px; }`,
+      `#${DOCK_ID} .card-status.err { color:#f28b82; }`,
+      `#${DOCK_ID} .card-status.ok { color:#81c995; }`,
+      `#${DOCK_ID} .cards-empty { font-size:11px; color:#9aa0a6; }`,
+      `#${DOCK_ID} .setting { display:flex; flex-direction:column; gap:4px; }`,
+      `#${DOCK_ID} .setting-head { display:flex; align-items:center; gap:6px; width:100%; background:transparent; border:none; color:#e8eaed; font-size:12px; font-weight:600; font-family:inherit; cursor:pointer; padding:2px 0; text-align:left; transition:color .15s ease; }`,
+      `#${DOCK_ID} .setting-head:hover { color:#8ab4f8; }`,
+      `#${DOCK_ID} .setting-head .plus { flex:none; width:16px; text-align:center; color:#9aa0a6; }`,
+      `#${DOCK_ID} .setting-body { display:none; flex-direction:column; gap:4px; padding-left:22px; }`,
+      `#${DOCK_ID} .setting-body.open { display:flex; }`,
     ].join("\n");
     document.head.appendChild(style);
   }
@@ -531,14 +610,10 @@ function buildDock() {
   const smallBtnStyle =
     "background:#303134;color:#e8eaed;border:1px solid #5f6368;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;";
 
-  /* ---- backend settings row (gear) ---- */
+  /* ---- settings row (gear): collapsible sections ---- */
 
   const settingsRow = document.createElement("div");
-  settingsRow.style.cssText = "display:none;flex-direction:column;gap:4px;";
-
-  const backendLabel = document.createElement("p");
-  backendLabel.textContent = "Rosterly backend URL";
-  backendLabel.style.cssText = labelStyle;
+  settingsRow.style.cssText = "display:none;flex-direction:column;gap:6px;";
 
   const backendInput = document.createElement("input");
   backendInput.placeholder = DEFAULT_BACKEND;
@@ -557,14 +632,6 @@ function buildDock() {
     refreshChannels();
   };
 
-  settingsRow.appendChild(backendLabel);
-  settingsRow.appendChild(backendInput);
-  settingsRow.appendChild(backendSave);
-
-  const channelLabel = document.createElement("p");
-  channelLabel.textContent = "Rosterly channel";
-  channelLabel.style.cssText = labelStyle;
-
   const channelSelect = document.createElement("select");
   channelSelect.style.cssText = selectStyle;
 
@@ -576,10 +643,6 @@ function buildDock() {
   masterTa.rows = 2;
   masterTa.placeholder = "e.g. Warm 2D editorial illustration, Japanese rural setting —";
   masterTa.style.cssText = textareaStyle;
-
-  const presetLabel = document.createElement("p");
-  presetLabel.textContent = "Preset / template (adds to master)";
-  presetLabel.style.cssText = labelStyle;
 
   const presetSelect = document.createElement("select");
   presetSelect.style.cssText = selectStyle;
@@ -683,35 +746,50 @@ function buildDock() {
     cardsBox.innerHTML = "";
     if (!cards.length) {
       const span = document.createElement("span");
+      span.className = "cards-empty";
       span.textContent = "No cards yet — paste prompts above and split, or add an empty card.";
-      span.style.cssText = "font-size:11px;color:#9aa0a6;";
       cardsBox.appendChild(span);
       return;
     }
     cards.forEach((card, index) => {
       if (!Array.isArray(card.refs)) card.refs = [];
       const cardEl = document.createElement("div");
-      cardEl.style.cssText =
-        "border:1px solid #444746;border-radius:8px;padding:6px;background:#26282b;display:flex;flex-direction:column;gap:4px;";
+      cardEl.className = "card";
 
-      const row = document.createElement("div");
-      row.style.cssText = "display:flex;align-items:center;gap:4px;";
+      const top = document.createElement("div");
+      top.className = "card-top";
 
       const num = document.createElement("span");
+      num.className = "card-num";
       num.textContent = `${index + 1}`;
-      num.style.cssText = "color:#9aa0a6;font-size:11px;flex:none;width:14px;";
 
       const ta = document.createElement("textarea");
       ta.rows = 2;
       ta.value = card.text;
-      ta.placeholder = `Card ${index + 1} prompt`;
-      ta.style.cssText = textareaStyle;
+      ta.placeholder = `Card ${index + 1} prompt — or "name.png prompt"`;
       ta.oninput = () => (card.text = ta.value);
 
+      const del = document.createElement("button");
+      del.className = "card-del";
+      del.textContent = "✕";
+      del.title = "Remove card";
+      del.onclick = () => {
+        card.refs.forEach(revokeRef);
+        removeCard(card.id);
+      };
+
+      top.appendChild(num);
+      top.appendChild(ta);
+      top.appendChild(del);
+      cardEl.appendChild(top);
+
+      const actions = document.createElement("div");
+      actions.className = "card-actions";
+
       const refBtn = document.createElement("button");
-      refBtn.textContent = `+ Add images${card.refs.length ? ` (${card.refs.length})` : ""}`;
+      refBtn.className = "chip-btn";
+      refBtn.textContent = `＋ Images${card.refs.length ? ` · ${card.refs.length}` : ""}`;
       refBtn.title = "Attach reference images from your PC — used automatically by the engine";
-      refBtn.style.cssText = smallBtnStyle;
       refBtn.onclick = () => {
         const fileInput = document.createElement("input");
         fileInput.type = "file";
@@ -727,10 +805,10 @@ function buildDock() {
       };
 
       const flowBtn = document.createElement("button");
+      flowBtn.className = "chip-btn";
       flowBtn.textContent = "🖼 From Flow";
       flowBtn.title =
         "Attach images currently visible in Flow (its gallery/results) as references";
-      flowBtn.style.cssText = smallBtnStyle;
       flowBtn.onclick = () => {
         scanForImages();
         const flowImgs = deepQueryAll("img")
@@ -754,24 +832,13 @@ function buildDock() {
         renderCards();
       };
 
-      const del = document.createElement("button");
-      del.textContent = "✕";
-      del.title = "Remove card";
-      del.style.cssText =
-        "background:transparent;border:1px solid #f28b82;color:#f28b82;border-radius:6px;width:24px;cursor:pointer;font-size:11px;flex:none;";
-      del.onclick = () => removeCard(card.id);
-
-      row.appendChild(num);
-      row.appendChild(ta);
-      row.appendChild(refBtn);
-      row.appendChild(flowBtn);
-      row.appendChild(del);
-      cardEl.appendChild(row);
+      actions.appendChild(refBtn);
+      actions.appendChild(flowBtn);
+      cardEl.appendChild(actions);
 
       if (card.pickerOpen && card.flowPicker) {
         const picker = document.createElement("div");
-        picker.style.cssText =
-          "display:flex;flex-wrap:wrap;gap:4px;max-height:110px;overflow-y:auto;border:1px dashed #5f6368;border-radius:6px;padding:4px;";
+        picker.className = "picker";
         const flowImgs = deepQueryAll("img")
           .filter(
             (img) =>
@@ -786,8 +853,8 @@ function buildDock() {
 
         if (!flowImgs.length) {
           const span = document.createElement("span");
+          span.className = "hint";
           span.textContent = "No Flow images visible — generate something first.";
-          span.style.cssText = "font-size:11px;color:#9aa0a6;";
           picker.appendChild(span);
         }
 
@@ -796,11 +863,11 @@ function buildDock() {
           const th = document.createElement("img");
           th.src = imgInfo.src;
           th.title = `Flow image — click to ${selected ? "remove" : "attach"} as reference`;
-          th.style.cssText = `width:44px;height:44px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid ${
-            selected ? "#34a853" : "transparent"
-          };`;
+          if (selected) th.className = "sel";
           th.onclick = () => {
             if (selected) {
+              const ref = card.refs.find((r) => r.url === imgInfo.src);
+              if (ref) revokeRef(ref);
               card.refs = card.refs.filter((r) => r.url !== imgInfo.src);
             } else {
               card.refs.push({ label: "Flow image", url: imgInfo.src });
@@ -814,27 +881,29 @@ function buildDock() {
 
       if (card.refs.length) {
         const refStrip = document.createElement("div");
-        refStrip.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;";
+        refStrip.className = "ref-strip";
         card.refs.forEach((ref, refIdx) => {
-          const refItem = document.createElement("span");
-          refItem.style.cssText =
-            "position:relative;display:inline-flex;align-items:center;gap:3px;background:#303134;border:1px solid #5f6368;border-radius:6px;padding:2px 4px;font-size:10px;color:#e8eaed;max-width:130px;";
+          const chip = document.createElement("span");
+          chip.className = "ref-chip";
+          const thumb = document.createElement("img");
+          thumb.src = refThumbUrl(ref);
+          thumb.alt = "";
+          chip.appendChild(thumb);
           const nameSpan = document.createElement("span");
+          nameSpan.className = "ref-name";
           nameSpan.textContent = ref.label;
-          nameSpan.style.cssText =
-            "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px;";
+          nameSpan.title = ref.label;
+          chip.appendChild(nameSpan);
           const rm = document.createElement("button");
           rm.textContent = "✕";
           rm.title = "Remove this image";
-          rm.style.cssText =
-            "background:none;border:none;color:#9aa0a6;cursor:pointer;font-size:10px;padding:0 2px;";
           rm.onclick = () => {
+            revokeRef(ref);
             card.refs.splice(refIdx, 1);
             renderCards();
           };
-          refItem.appendChild(nameSpan);
-          refItem.appendChild(rm);
-          refStrip.appendChild(refItem);
+          chip.appendChild(rm);
+          refStrip.appendChild(chip);
         });
         cardEl.appendChild(refStrip);
       }
@@ -842,7 +911,6 @@ function buildDock() {
       const cardStatus = document.createElement("span");
       cardStatus.className = "card-status";
       cardStatus.dataset.cardId = card.id;
-      cardStatus.style.cssText = "font-size:11px;color:#9aa0a6;min-height:12px;";
       cardEl.appendChild(cardStatus);
 
       cardsBox.appendChild(cardEl);
@@ -853,7 +921,8 @@ function buildDock() {
     const el = cardsBox.querySelector(`.card-status[data-card-id="${id}"]`);
     if (el) {
       el.textContent = text;
-      el.style.color = isError ? "#f28b82" : "#9aa0a6";
+      el.classList.toggle("err", !!isError);
+      el.classList.toggle("ok", !isError && text.includes("✓"));
     }
   };
 
@@ -897,9 +966,10 @@ function buildDock() {
       const opt = document.createElement("option");
       opt.textContent = `Backend unreachable: ${err.message}`;
       channelSelect.appendChild(opt);
-      // Surface the gear so the user can fix the backend URL.
+      // Surface the gear and open the backend section so the user can fix it.
       backendInput.value = await getBackendBase();
       settingsRow.style.display = "flex";
+      backendSetting.open();
     }
   };
 
@@ -1158,14 +1228,21 @@ function buildDock() {
     if (dockMaster) masterTa.value = dockMaster;
   });
 
-  settingsRow.appendChild(backendLabel);
-  settingsRow.appendChild(backendInput);
-  settingsRow.appendChild(backendSave);
-  settingsRow.appendChild(channelLabel);
-  settingsRow.appendChild(channelSelect);
-  settingsRow.appendChild(presetLabel);
-  settingsRow.appendChild(presetSelect);
-  settingsRow.appendChild(presetBtn);
+  const backendSetting = buildSettingItem("Rosterly backend URL", [
+    backendInput,
+    backendSave,
+  ]);
+  const channelSetting = buildSettingItem("Rosterly channel", channelSelect);
+  const presetSetting = buildSettingItem("Preset / template (adds to master)", [
+    presetSelect,
+    presetBtn,
+  ]);
+  const diagSetting = buildSettingItem("Diagnose page", diagBtn);
+
+  settingsRow.appendChild(backendSetting.wrap);
+  settingsRow.appendChild(channelSetting.wrap);
+  settingsRow.appendChild(presetSetting.wrap);
+  settingsRow.appendChild(diagSetting.wrap);
 
   body.appendChild(masterLabel);
   body.appendChild(masterTa);
@@ -1177,7 +1254,6 @@ function buildDock() {
   body.appendChild(autoUpscaleLabel);
   body.appendChild(generateBtn);
   body.appendChild(stopBtn);
-  body.appendChild(diagBtn);
   body.appendChild(status);
 
   dock.appendChild(header);
