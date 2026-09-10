@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+dist/
+
+# Local data
+backend/rosterly.db
+backend/storage/*
+!backend/storage/.gitkeep
+
+# Misc
+.DS_Store
+*.log
