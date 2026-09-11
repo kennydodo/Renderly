@@ -65,7 +65,9 @@ function deepQueryAll(selector) {
 }
 
 function isOurElement(el) {
-  return !!el.closest && !!el.closest(`#${DOCK_ID}`);
+  return (
+    !!el.closest && !!el.closest(`#${DOCK_ID}, #${DOCK_ID}-settings`)
+  );
 }
 
 function isVisible(el) {
@@ -599,13 +601,20 @@ async function uploadRefAsset(channelId, ref, index) {
 /* ================= Dock UI ================= */
 
 function buildDock() {
-  if (document.getElementById(DOCK_ID)) return;
+  // Remove any orphaned dock/panel/style left by a previous content script
+  // (e.g. after an extension reload without a tab reload), then build fresh.
+  const existingDock = document.getElementById(DOCK_ID);
+  if (existingDock) existingDock.remove();
+  const existingPanel = document.getElementById(`${DOCK_ID}-settings`);
+  if (existingPanel) existingPanel.remove();
+  const existingStyle = document.getElementById(`${DOCK_ID}-style`);
+  if (existingStyle) existingStyle.remove();
 
-  // Scrollbar styling for the cards list.
-  if (!document.getElementById(`${DOCK_ID}-style`)) {
-    const style = document.createElement("style");
-    style.id = `${DOCK_ID}-style`;
-    style.textContent = [
+  // Styling for the dock, cards and settings panel — always rebuilt so rule
+  // changes take effect without a tab reload.
+  const style = document.createElement("style");
+  style.id = `${DOCK_ID}-style`;
+  style.textContent = [
       `#${DOCK_ID} .cards::-webkit-scrollbar { width: 8px; }`,
       `#${DOCK_ID} .cards::-webkit-scrollbar-track { background: transparent; }`,
       `#${DOCK_ID} .cards::-webkit-scrollbar-thumb { background: #5f6368; border-radius: 4px; }`,
@@ -642,15 +651,18 @@ function buildDock() {
       `#${DOCK_ID} .progress-fill { height:100%; width:0%; background:#8ab4f8; border-radius:2px; transition:width .3s ease; }`,
       `#${DOCK_ID} .card.done { opacity:0.72; }`,
       `#${DOCK_ID} .card.done .card-num { background:#188038; }`,
-      `#${DOCK_ID} .setting { display:flex; flex-direction:column; gap:4px; }`,
-      `#${DOCK_ID} .setting-head { display:flex; align-items:center; gap:6px; width:100%; background:transparent; border:none; color:#e8eaed; font-size:12px; font-weight:600; font-family:inherit; cursor:pointer; padding:2px 0; text-align:left; transition:color .15s ease; }`,
-      `#${DOCK_ID} .setting-head:hover { color:#8ab4f8; }`,
-      `#${DOCK_ID} .setting-head .plus { flex:none; width:16px; text-align:center; color:#9aa0a6; }`,
-      `#${DOCK_ID} .setting-body { display:none; flex-direction:column; gap:4px; padding-left:22px; }`,
-      `#${DOCK_ID} .setting-body.open { display:flex; }`,
+      `#${DOCK_ID} .setting, #${DOCK_ID}-settings .setting { display:flex; flex-direction:column; gap:4px; }`,
+      `#${DOCK_ID} .setting-head, #${DOCK_ID}-settings .setting-head { display:flex; align-items:center; gap:6px; width:100%; background:transparent; border:none; color:#e8eaed; font-size:12px; font-weight:600; font-family:inherit; cursor:pointer; padding:2px 0; text-align:left; transition:color .15s ease; }`,
+      `#${DOCK_ID} .setting-head:hover, #${DOCK_ID}-settings .setting-head:hover { color:#8ab4f8; }`,
+      `#${DOCK_ID} .setting-head .plus, #${DOCK_ID}-settings .setting-head .plus { flex:none; width:16px; text-align:center; color:#9aa0a6; }`,
+      `#${DOCK_ID} .setting-body, #${DOCK_ID}-settings .setting-body { display:none; flex-direction:column; gap:4px; padding-left:22px; }`,
+      `#${DOCK_ID} .setting-body.open, #${DOCK_ID}-settings .setting-body.open { display:flex; }`,
+      `#${DOCK_ID}-settings { position:fixed; bottom:24px; right:396px; z-index:99998; width:300px; max-height:92vh; overflow-y:auto; background:#1e1f20; border:1px solid #444746; border-radius:12px; padding:12px; box-shadow:0 4px 12px rgba(0,0,0,0.4); display:flex; flex-direction:column; gap:8px; font-family:system-ui,sans-serif; font-size:13px; color:#e8eaed; opacity:0; transform:translateX(24px); pointer-events:none; transition:opacity .18s ease, transform .18s ease; }`,
+      `#${DOCK_ID}-settings.open { opacity:1; transform:translateX(0); pointer-events:auto; }`,
+      `#${DOCK_ID}-settings::-webkit-scrollbar { width: 8px; }`,
+      `#${DOCK_ID}-settings::-webkit-scrollbar-thumb { background: #5f6368; border-radius: 4px; }`,
     ].join("\n");
-    document.head.appendChild(style);
-  }
+  document.head.appendChild(style);
 
   const dock = document.createElement("div");
   dock.id = DOCK_ID;
@@ -723,10 +735,65 @@ function buildDock() {
   const smallBtnStyle =
     "background:#303134;color:#e8eaed;border:1px solid #5f6368;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;";
 
-  /* ---- settings row (gear): collapsible sections ---- */
+  /* ---- settings panel (gear): slides out to the left of the dock ---- */
 
   const settingsRow = document.createElement("div");
-  settingsRow.style.cssText = "display:none;flex-direction:column;gap:6px;";
+  settingsRow.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+
+  const settingsPanel = document.createElement("div");
+  settingsPanel.id = `${DOCK_ID}-settings`;
+  // Layout + visibility are inline so the panel works even if the injected
+  // stylesheet is ever stale.
+  settingsPanel.style.cssText = [
+    "position:fixed",
+    "bottom:24px",
+    "right:396px",
+    "z-index:99998",
+    "width:300px",
+    "max-height:92vh",
+    "overflow-y:auto",
+    "background:#1e1f20",
+    "border:1px solid #444746",
+    "border-radius:12px",
+    "padding:12px",
+    "box-shadow:0 4px 12px rgba(0,0,0,0.4)",
+    "display:flex",
+    "flex-direction:column",
+    "gap:8px",
+    "font-family:system-ui,sans-serif",
+    "font-size:13px",
+    "color:#e8eaed",
+    "opacity:0",
+    "transform:translateX(24px)",
+    "pointer-events:none",
+    "transition:opacity .18s ease, transform .18s ease",
+  ].join(";");
+  const panelHeader = document.createElement("div");
+  panelHeader.style.cssText = "display:flex;align-items:center;justify-content:space-between;";
+  const panelTitle = document.createElement("span");
+  panelTitle.textContent = "Rosterly settings";
+  panelTitle.style.cssText = "font-weight:600;letter-spacing:0.3px;";
+  const panelClose = document.createElement("button");
+  panelClose.textContent = "✕";
+  panelClose.title = "Close settings";
+  panelClose.style.cssText = headerBtnStyle;
+  panelClose.onclick = () => setSettingsOpen(false);
+  panelHeader.appendChild(panelTitle);
+  panelHeader.appendChild(panelClose);
+  settingsPanel.appendChild(panelHeader);
+  settingsPanel.appendChild(settingsRow);
+  document.body.appendChild(settingsPanel);
+
+  let settingsOpen = false;
+  const setSettingsOpen = (open) => {
+    settingsOpen = open;
+    settingsPanel.classList.toggle("open", open);
+    settingsPanel.style.opacity = open ? "1" : "0";
+    settingsPanel.style.transform = open ? "translateX(0)" : "translateX(24px)";
+    settingsPanel.style.pointerEvents = open ? "auto" : "none";
+    gearBtn.style.background = open ? "#0b57d0" : "#303134";
+    gearBtn.style.borderColor = open ? "#8ab4f8" : "#5f6368";
+  };
 
   const backendInput = document.createElement("input");
   backendInput.placeholder = DEFAULT_BACKEND;
@@ -739,7 +806,7 @@ function buildDock() {
   backendSave.onclick = async () => {
     const url = backendInput.value.trim().replace(/\/+$/, "") || DEFAULT_BACKEND;
     await chrome.storage.local.set({ backendUrl: url });
-    settingsRow.style.display = "none";
+    setSettingsOpen(false);
     setStatus("Backend URL saved.");
     templates = [];
     refreshChannels();
@@ -892,7 +959,7 @@ function buildDock() {
   pasteTa.style.cssText = textareaStyle;
 
   const splitRow = document.createElement("div");
-  splitRow.style.cssText = "display:flex;gap:6px;";
+  splitRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
 
   const splitBtn = document.createElement("button");
   splitBtn.textContent = "✂ Split into cards";
@@ -902,8 +969,25 @@ function buildDock() {
   addCardBtn.textContent = "+ Empty card";
   addCardBtn.style.cssText = smallBtnStyle;
 
+  const removeAllBtn = document.createElement("button");
+  removeAllBtn.textContent = "🗑 Remove all";
+  removeAllBtn.title = "Remove every card from the list";
+  removeAllBtn.style.cssText = smallBtnStyle;
+  removeAllBtn.onclick = () => {
+    if (!cards.length) {
+      setStatus("No cards to remove.", true);
+      return;
+    }
+    cards.forEach((c) => (c.refs || []).forEach(revokeRef));
+    cards = [];
+    renderCards();
+    scheduleSaveCards();
+    setStatus("All cards removed.");
+  };
+
   splitRow.appendChild(splitBtn);
   splitRow.appendChild(addCardBtn);
+  splitRow.appendChild(removeAllBtn);
 
   const cardsLabel = document.createElement("p");
   cardsLabel.textContent = "Cards (each = one Flow generation)";
@@ -992,12 +1076,14 @@ function buildDock() {
   };
 
   gearBtn.onclick = async () => {
-    const open = settingsRow.style.display !== "none";
-    settingsRow.style.display = open ? "none" : "flex";
-    if (!open) backendInput.value = await getBackendBase();
+    setSettingsOpen(!settingsOpen);
+    if (settingsOpen) backendInput.value = await getBackendBase();
   };
 
-  closeBtn.onclick = () => dock.remove();
+  closeBtn.onclick = () => {
+    dock.remove();
+    settingsPanel.remove();
+  };
 
   /* ---- cards state & rendering ---- */
 
@@ -1301,7 +1387,7 @@ function buildDock() {
       channelSelect.appendChild(opt);
       // Surface the gear and open the backend section so the user can fix it.
       backendInput.value = await getBackendBase();
-      settingsRow.style.display = "flex";
+      setSettingsOpen(true);
       backendSetting.open();
     }
   };
@@ -1368,25 +1454,31 @@ function buildDock() {
 
     const versions = await getCardVersions();
     const ratio = await getAspectRatio();
-    const gens = [];
-    for (let v = 0; v < versions; v++) {
-      setCardStatus(
-        card.id,
-        versions > 1
-          ? `Generating ${v + 1}/${versions} via Rosterly engine…`
-          : "Generating via Rosterly engine…"
-      );
-      const body = { prompt, asset_ids: uniqueAssetIds, aspect_ratio: ratio };
-      if (cardName) body.name = cardName;
-      const gen = await backendJson(`/api/channels/${channelSelect.value}/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+    setCardStatus(
+      card.id,
+      versions > 1
+        ? `Generating ${versions} versions via Rosterly engine…`
+        : "Generating via Rosterly engine…"
+    );
+    // Versions are independent — fire them all at once.
+    const gens = await Promise.all(
+      Array.from({ length: versions }, () =>
+        backendJson(`/api/channels/${channelSelect.value}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            asset_ids: uniqueAssetIds,
+            aspect_ratio: ratio,
+            ...(cardName ? { name: cardName } : {}),
+          }),
+        })
+      )
+    );
+    for (const gen of gens) {
       if (gen.status !== "done" || !gen.image_url) {
         throw new Error(gen.error || "Generation failed in Rosterly");
       }
-      gens.push(gen);
       runCostUsd += gen.cost_usd || 0;
     }
 
@@ -1580,17 +1672,27 @@ function buildDock() {
     let done = 0;
     let ok = 0;
     let skipped = 0;
+    let inflight = 0;
     const total = usable.length;
     setProgress(0, total);
+    // The bar advances as cards START (half-credit while in flight), so it
+    // visibly moves during long generations — not only on completion.
+    const updateProgress = () => {
+      progressWrap.style.display = "block";
+      const pct = Math.min(100, Math.round(((done + inflight * 0.5) / total) * 100));
+      progressFill.style.width = `${pct}%`;
+    };
 
     const runOne = async (card, i) => {
       if (card.done) {
         skipped++;
         done++;
-        setProgress(done, total);
+        updateProgress();
         setCardStatus(card.id, "✓ already done — skipped");
         return;
       }
+      inflight++;
+      updateProgress();
       let lastErr = null;
       for (let attempt = 0; attempt <= retryAttempts; attempt++) {
         if (!batchRunning) break;
@@ -1616,7 +1718,8 @@ function buildDock() {
         addRetryButton(card);
       }
       done++;
-      setProgress(done, total);
+      inflight = Math.max(0, inflight - 1);
+      updateProgress();
       scheduleSaveCards();
     };
 
@@ -1862,6 +1965,31 @@ function buildDock() {
   settingsRow.appendChild(pasteSetting.wrap);
   settingsRow.appendChild(diagSetting.wrap);
 
+  const resetBtn = document.createElement("button");
+  resetBtn.textContent = "⚠ Reset Rosterly";
+  resetBtn.title =
+    "Complete reset: removes all cards, the master prompt, global references and statuses. Backend data is not touched.";
+  resetBtn.style.cssText =
+    "background:#5c1a1a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;";
+  resetBtn.onclick = async () => {
+    cards.forEach((c) => (c.refs || []).forEach(revokeRef));
+    masterRefs.forEach(revokeRef);
+    cards = [];
+    masterRefs = [];
+    masterTa.value = "";
+    batchRunning = false;
+    generateBtn.disabled = false;
+    stopBtn.style.display = "none";
+    await chrome.storage.local.set({ dockMaster: "" });
+    await chrome.storage.local.remove("savedCards");
+    renderCards();
+    renderMasterRefs();
+    setSettingsOpen(false);
+    setProgress(null);
+    setStatus("Rosterly reset — the dock is back to its initial state.");
+  };
+  settingsPanel.appendChild(resetBtn);
+
   body.appendChild(masterLabel);
   body.appendChild(masterTa);
   body.appendChild(masterRefsRow);
@@ -1879,7 +2007,6 @@ function buildDock() {
 
   dock.appendChild(header);
   dock.appendChild(progressWrap);
-  dock.appendChild(settingsRow);
   dock.appendChild(body);
   document.body.appendChild(dock);
 
@@ -1919,6 +2046,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const dock = document.getElementById(DOCK_ID);
     if (dock) {
       dock.remove();
+      const panel = document.getElementById(`${DOCK_ID}-settings`);
+      if (panel) panel.remove();
       sendResponse({ visible: false });
     } else {
       buildDock();
