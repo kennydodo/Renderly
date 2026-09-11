@@ -1,5 +1,5 @@
 const DOCK_ID = "renderly-dock";
-const DOCK_VERSION = "1.9.1";
+const DOCK_VERSION = "1.9.2";
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 
 const PRESETS = [
@@ -1497,7 +1497,7 @@ function buildDock() {
     for (let v = 0; v < gens.length; v++) {
       const gen = gens[v];
       let label = gen.name || cardName || "image";
-      const suffix = gens.length > 1 ? `-v${v + 1}` : "";
+      const fileBase = safeFileName(gen.name || cardName || "image");
       if (autoUpscaleCheck.checked) {
         setCardStatus(
           card.id,
@@ -1513,7 +1513,7 @@ function buildDock() {
           runCostUsd += up.cost_usd || 0;
           const base = await getBackendBase();
           const res = await fetch(new URL(up.image_url, base).href);
-          downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
+          downloadBlob(await res.blob(), `${fileBase}.png`);
           labels.push(label);
           continue;
         } catch (err) {
@@ -1524,7 +1524,7 @@ function buildDock() {
       try {
         const base = await getBackendBase();
         const res = await fetch(new URL(gen.image_url, base).href);
-        downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
+        downloadBlob(await res.blob(), `${fileBase}.png`);
       } catch {
         /* the image stays in Renderly's gallery */
       }
@@ -1552,7 +1552,6 @@ function buildDock() {
     const versions = await getCardVersions();
     const labels = [];
     for (let v = 0; v < versions; v++) {
-      const suffix = versions > 1 ? `-v${v + 1}` : "";
       const versionLabel = versions > 1 ? ` (${v + 1}/${versions})` : "";
 
       setCardStatus(card.id, "Filling prompt…");
@@ -1617,6 +1616,9 @@ function buildDock() {
         cardPrompt || "Generated in Google Flow"
       );
       let label = genRecord && genRecord.name ? genRecord.name : cardName || "flow-image";
+      const fileBase = safeFileName(
+        (genRecord && genRecord.name) || cardName || "flow-image"
+      );
       runCostUsd += (genRecord && genRecord.cost_usd) || 0;
 
       if (autoUpscaleCheck.checked) {
@@ -1631,7 +1633,7 @@ function buildDock() {
           runCostUsd += up.cost_usd || 0;
           const base = await getBackendBase();
           const res = await fetch(new URL(up.image_url, base).href);
-          downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
+          downloadBlob(await res.blob(), `${fileBase}.png`);
           labels.push(label);
           continue;
         } catch (err) {
@@ -1641,7 +1643,7 @@ function buildDock() {
 
       try {
         const blob = await fetchImageAsBlob(img.currentSrc || img.src);
-        downloadBlob(blob, `${safeFileName(label)}${suffix}.png`);
+        downloadBlob(blob, `${fileBase}.png`);
       } catch {
         /* gallery copy still exists */
       }
