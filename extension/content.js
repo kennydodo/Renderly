@@ -496,6 +496,29 @@ async function getAspectRatio() {
   return "16:9";
 }
 
+// Engine cards run 4-at-a-time when enabled (Flow-path cards always run solo).
+async function getParallelGen() {
+  try {
+    const { parallelGen } = await chrome.storage.local.get("parallelGen");
+    return parallelGen !== false;
+  } catch {
+    /* fall through to default */
+  }
+  return true;
+}
+
+// How many automatic retries a failed card gets before the retry chip appears.
+async function getRetryAttempts() {
+  try {
+    const { retryAttempts } = await chrome.storage.local.get("retryAttempts");
+    const n = Number(retryAttempts);
+    if (n >= 0 && n <= 3) return n;
+  } catch {
+    /* fall through to default */
+  }
+  return 2;
+}
+
 function urlToDataUrl(url) {
   return fetchImageAsBlob(url).then(fileToDataUrl);
 }
@@ -615,6 +638,10 @@ function buildDock() {
       `#${DOCK_ID} .card-status.err { color:#f28b82; }`,
       `#${DOCK_ID} .card-status.ok { color:#81c995; }`,
       `#${DOCK_ID} .cards-empty { font-size:11px; color:#9aa0a6; }`,
+      `#${DOCK_ID} .progress { height:4px; background:#303134; border-radius:2px; overflow:hidden; margin:0 2px; display:none; }`,
+      `#${DOCK_ID} .progress-fill { height:100%; width:0%; background:#8ab4f8; border-radius:2px; transition:width .3s ease; }`,
+      `#${DOCK_ID} .card.done { opacity:0.72; }`,
+      `#${DOCK_ID} .card.done .card-num { background:#188038; }`,
       `#${DOCK_ID} .setting { display:flex; flex-direction:column; gap:4px; }`,
       `#${DOCK_ID} .setting-head { display:flex; align-items:center; gap:6px; width:100%; background:transparent; border:none; color:#e8eaed; font-size:12px; font-weight:600; font-family:inherit; cursor:pointer; padding:2px 0; text-align:left; transition:color .15s ease; }`,
       `#${DOCK_ID} .setting-head:hover { color:#8ab4f8; }`,
@@ -920,6 +947,44 @@ function buildDock() {
     status.style.color = isError ? "#f28b82" : "#9aa0a6";
   };
 
+  /* ---- batch progress bar ---- */
+
+  const progressWrap = document.createElement("div");
+  progressWrap.className = "progress";
+  const progressFill = document.createElement("div");
+  progressFill.className = "progress-fill";
+  progressWrap.appendChild(progressFill);
+
+  const setProgress = (done, total) => {
+    if (done === null || !total) {
+      progressWrap.style.display = "none";
+      progressFill.style.width = "0%";
+      return;
+    }
+    progressWrap.style.display = "block";
+    progressFill.style.width = `${Math.round((done / total) * 100)}%`;
+  };
+
+  /* ---- card persistence (survives page reloads; refs are session-only) ---- */
+
+  let saveTimer = null;
+  const scheduleSaveCards = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (!cards.length) {
+        chrome.storage.local.remove("savedCards");
+        return;
+      }
+      chrome.storage.local.set({
+        savedCards: cards.map((c) => ({
+          text: c.text,
+          done: !!c.done,
+          failed: !!c.failed,
+        })),
+      });
+    }, 500);
+  };
+
   collapseBtn.onclick = () => {
     const hidden = body.style.display === "none";
     body.style.display = hidden ? "flex" : "none";
@@ -939,11 +1004,13 @@ function buildDock() {
   const addCard = (text) => {
     cards.push({ id: ++cardSeq, text: text || "", refs: [] });
     renderCards();
+    scheduleSaveCards();
   };
 
   const removeCard = (id) => {
     cards = cards.filter((c) => c.id !== id);
     renderCards();
+    scheduleSaveCards();
   };
 
   const renderCards = () => {
@@ -960,6 +1027,7 @@ function buildDock() {
       const cardEl = document.createElement("div");
       cardEl.className = "card";
       cardEl.dataset.cardId = card.id;
+      if (card.done) cardEl.classList.add("done");
 
       const top = document.createElement("div");
       top.className = "card-top";
@@ -972,7 +1040,13 @@ function buildDock() {
       ta.rows = 2;
       ta.value = card.text;
       ta.placeholder = `Card ${index + 1} prompt — or "name.png prompt"`;
-      ta.oninput = () => (card.text = ta.value);
+      ta.oninput = () => {
+        card.text = ta.value;
+        card.done = false;
+        card.failed = false;
+        removeRetryButton(card);
+        scheduleSaveCards();
+      };
 
       const del = document.createElement("button");
       del.className = "card-del";
@@ -1116,9 +1190,14 @@ function buildDock() {
       const cardStatus = document.createElement("span");
       cardStatus.className = "card-status";
       cardStatus.dataset.cardId = card.id;
+      if (card.done) {
+        cardStatus.textContent = "✓ done";
+        cardStatus.classList.add("ok");
+      }
       cardEl.appendChild(cardStatus);
 
       cardsBox.appendChild(cardEl);
+      if (card.failed) addRetryButton(card);
     });
   };
 
@@ -1161,9 +1240,14 @@ function buildDock() {
       try {
         await runCard(card, cards.indexOf(card), cards.length);
         btn.remove();
+        card.done = true;
+        card.failed = false;
+        scheduleSaveCards();
         setStatus(`Retry succeeded — "${card.displayName || `card ${card.id}`}" ✓`);
       } catch (err) {
         setCardStatus(card.id, `✕ ${err.message}`, true);
+        card.failed = true;
+        scheduleSaveCards();
         setStatus(`Retry failed: ${err.message}`, true);
         btn.disabled = false;
         btn.textContent = "↻ Retry";
@@ -1249,6 +1333,7 @@ function buildDock() {
     }
     cards = lines.map((line) => ({ id: ++cardSeq, text: line, refs: [] }));
     renderCards();
+    scheduleSaveCards();
     pasteTa.value = "";
     setStatus(`${cards.length} card(s) created. Review them, then Send.`);
   };
@@ -1302,6 +1387,7 @@ function buildDock() {
         throw new Error(gen.error || "Generation failed in Rosterly");
       }
       gens.push(gen);
+      runCostUsd += gen.cost_usd || 0;
     }
 
     const labels = [];
@@ -1321,6 +1407,7 @@ function buildDock() {
             body: JSON.stringify({ scale: await getUpscaleScale() }),
           });
           label = `${up.name} (${up.image_size})`;
+          runCostUsd += up.cost_usd || 0;
           const base = await getBackendBase();
           const res = await fetch(new URL(up.image_url, base).href);
           downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
@@ -1427,6 +1514,7 @@ function buildDock() {
         cardPrompt || "Generated in Google Flow"
       );
       let label = genRecord && genRecord.name ? genRecord.name : cardName || "flow-image";
+      runCostUsd += (genRecord && genRecord.cost_usd) || 0;
 
       if (autoUpscaleCheck.checked) {
         setCardStatus(card.id, `Upscaling (local GPU)…${versionLabel}`);
@@ -1437,6 +1525,7 @@ function buildDock() {
             body: JSON.stringify({ scale: await getUpscaleScale() }),
           });
           label = `${up.name} (${up.image_size})`;
+          runCostUsd += up.cost_usd || 0;
           const base = await getBackendBase();
           const res = await fetch(new URL(up.image_url, base).href);
           downloadBlob(await res.blob(), `${safeFileName(label)}${suffix}.png`);
@@ -1471,32 +1560,114 @@ function buildDock() {
       return;
     }
 
+    const parallel = await getParallelGen();
+    const retryAttempts = await getRetryAttempts();
+    const isEngine = (c) => c.refs.length > 0 || masterRefs.length > 0;
+
+    // Aspect ratio only reaches the engine — warn when Flow-path cards exist.
+    const { aspectRatio: activeRatio } = await chrome.storage.local.get("aspectRatio");
+    const flowCount = usable.filter((c) => !isEngine(c)).length;
+    if (activeRatio && activeRatio !== "16:9" && flowCount > 0) {
+      setStatus(
+        `Note: ${flowCount} Flow-path card(s) will use Flow's own aspect ratio, not ${activeRatio}.`
+      );
+    }
+
     batchRunning = true;
     generateBtn.disabled = true;
     stopBtn.style.display = "block";
+    runCostUsd = 0;
     let done = 0;
-    try {
-      for (let i = 0; i < usable.length; i++) {
-        if (!batchRunning) {
-          setStatus(`Batch stopped at card ${i + 1}/${usable.length}.`, true);
-          break;
-        }
-        setStatus(`Card ${i + 1}/${usable.length}…`);
-        try {
-          await runCard(usable[i], i, usable.length);
-          done++;
-          removeRetryButton(usable[i]);
-        } catch (err) {
-          setCardStatus(usable[i].id, `✕ ${err.message}`, true);
-          addRetryButton(usable[i]);
-        }
-        await sleep(1500);
+    let ok = 0;
+    let skipped = 0;
+    const total = usable.length;
+    setProgress(0, total);
+
+    const runOne = async (card, i) => {
+      if (card.done) {
+        skipped++;
+        done++;
+        setProgress(done, total);
+        setCardStatus(card.id, "✓ already done — skipped");
+        return;
       }
-      setStatus(`Batch finished — ${done}/${usable.length} card(s) succeeded. ✓`);
+      let lastErr = null;
+      for (let attempt = 0; attempt <= retryAttempts; attempt++) {
+        if (!batchRunning) break;
+        try {
+          await runCard(card, i, total);
+          ok++;
+          card.done = true;
+          card.failed = false;
+          removeRetryButton(card);
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < retryAttempts && batchRunning) {
+            setCardStatus(card.id, `↻ Auto-retry ${attempt + 1}/${retryAttempts}…`);
+            await sleep(2000 * (attempt + 1));
+          }
+        }
+      }
+      if (lastErr && !card.done) {
+        card.failed = true;
+        setCardStatus(card.id, `✕ ${lastErr.message}`, true);
+        addRetryButton(card);
+      }
+      done++;
+      setProgress(done, total);
+      scheduleSaveCards();
+    };
+
+    try {
+      if (parallel) {
+        // Flow-path cards share the one Flow prompt box — always sequential.
+        const flowCards = usable.filter((c) => !isEngine(c));
+        let seq = 0;
+        for (const card of flowCards) {
+          if (!batchRunning) break;
+          setStatus(`Card ${++seq}/${flowCards.length} (Flow)…`);
+          await runOne(card, usable.indexOf(card));
+          await sleep(1500);
+        }
+        // Engine cards hit the backend API — run up to 4 concurrently.
+        const engineCards = usable.filter(isEngine);
+        let next = 0;
+        const workers = Array.from(
+          { length: Math.min(4, engineCards.length) },
+          async () => {
+            while (batchRunning && next < engineCards.length) {
+              const card = engineCards[next++];
+              setStatus(
+                `Engine cards: ${Math.min(next, engineCards.length)}/${engineCards.length} dispatched…`
+              );
+              await runOne(card, usable.indexOf(card));
+            }
+          }
+        );
+        await Promise.all(workers);
+      } else {
+        for (let i = 0; i < usable.length; i++) {
+          if (!batchRunning) {
+            setStatus(`Batch stopped at card ${i + 1}/${usable.length}.`, true);
+            break;
+          }
+          setStatus(`Card ${i + 1}/${usable.length}…`);
+          await runOne(usable[i], i);
+          await sleep(1500);
+        }
+      }
+      const stoppedNote = batchRunning ? "" : " (stopped)";
+      setStatus(
+        `Batch finished${stoppedNote} — ${ok + skipped}/${total} succeeded · $${runCostUsd.toFixed(2)} ✓`
+      );
     } finally {
       batchRunning = false;
       generateBtn.disabled = false;
       stopBtn.style.display = "none";
+      scheduleSaveCards();
+      setTimeout(() => setProgress(null), 4000);
     }
   };
 
@@ -1608,6 +1779,54 @@ function buildDock() {
 
   const scaleSetting = buildSettingItem("Auto-upscale target", scaleSelect);
 
+  const parallelCheckLabel = document.createElement("label");
+  parallelCheckLabel.style.cssText =
+    "display:flex;align-items:center;gap:6px;font-size:12px;color:#e8eaed;cursor:pointer;";
+  const parallelCheck = document.createElement("input");
+  parallelCheck.type = "checkbox";
+  parallelCheck.onchange = async () => {
+    await chrome.storage.local.set({ parallelGen: parallelCheck.checked });
+    setStatus(
+      parallelCheck.checked
+        ? "Parallel generation on — engine cards run 4 at a time."
+        : "Parallel generation off — cards run one at a time."
+    );
+  };
+  parallelCheckLabel.appendChild(parallelCheck);
+  const parallelCheckText = document.createElement("span");
+  parallelCheckText.textContent = "Generate engine cards 4 at a time (parallel)";
+  parallelCheckLabel.appendChild(parallelCheckText);
+  chrome.storage.local.get("parallelGen").then(({ parallelGen }) => {
+    parallelCheck.checked = parallelGen !== false;
+  });
+  const parallelSetting = buildSettingItem("Parallel generation", parallelCheckLabel);
+
+  const retrySelect = document.createElement("select");
+  retrySelect.style.cssText = selectStyle;
+  [
+    ["0", "0 retries (off)"],
+    ["1", "1 retry"],
+    ["2", "2 retries"],
+    ["3", "3 retries"],
+  ].forEach(([value, label]) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    retrySelect.appendChild(opt);
+  });
+  retrySelect.onchange = async () => {
+    await chrome.storage.local.set({ retryAttempts: Number(retrySelect.value) });
+    setStatus(
+      retrySelect.value === "0"
+        ? "Auto-retry off — failed cards go straight to the retry chip."
+        : `Failed cards auto-retry up to ${retrySelect.value} time(s).`
+    );
+  };
+  chrome.storage.local.get("retryAttempts").then(({ retryAttempts }) => {
+    retrySelect.value = String(Number(retryAttempts) || 2);
+  });
+  const retrySetting = buildSettingItem("Auto-retry failed cards", retrySelect);
+
   const pasteCheckLabel = document.createElement("label");
   pasteCheckLabel.style.cssText =
     "display:flex;align-items:center;gap:6px;font-size:12px;color:#e8eaed;cursor:pointer;";
@@ -1638,6 +1857,8 @@ function buildDock() {
   settingsRow.appendChild(versionsSetting.wrap);
   settingsRow.appendChild(ratioSetting.wrap);
   settingsRow.appendChild(scaleSetting.wrap);
+  settingsRow.appendChild(parallelSetting.wrap);
+  settingsRow.appendChild(retrySetting.wrap);
   settingsRow.appendChild(pasteSetting.wrap);
   settingsRow.appendChild(diagSetting.wrap);
 
@@ -1657,6 +1878,7 @@ function buildDock() {
   body.appendChild(status);
 
   dock.appendChild(header);
+  dock.appendChild(progressWrap);
   dock.appendChild(settingsRow);
   dock.appendChild(body);
   document.body.appendChild(dock);
@@ -1664,6 +1886,24 @@ function buildDock() {
   renderCards();
   renderMasterRefs();
   refreshChannels();
+
+  // Restore cards from the last session (text + done/failed state; refs are
+  // session-only and need re-attaching).
+  chrome.storage.local.get("savedCards").then(({ savedCards }) => {
+    if (Array.isArray(savedCards) && savedCards.length && !cards.length) {
+      cards = savedCards.map((c) => ({
+        id: ++cardSeq,
+        text: c.text || "",
+        refs: [],
+        done: !!c.done,
+        failed: !!c.failed,
+      }));
+      renderCards();
+      setStatus(
+        `Restored ${cards.length} card(s) from your last session — press ⚡ to continue.`
+      );
+    }
+  });
 }
 
 function startObserver() {
