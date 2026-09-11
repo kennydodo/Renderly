@@ -1,10 +1,10 @@
-# Privacy Policy — Flow × Rosterly (Chrome Extension)
+# Privacy Policy — Flow × Renderly (Chrome Extension)
 
 Last updated: 2026-09-10
 
 ## Overview
-Flow × Rosterly is a browser extension that connects Google Flow
-(labs.google/fx) to the user's own locally-installed Rosterly application.
+Flow × Renderly is a browser extension that connects Google Flow
+(labs.google/fx) to the user's own locally-installed Renderly application.
 It operates entirely between the user's browser and the user's own computer.
 
 ## Data we collect
@@ -16,10 +16,10 @@ no telemetry, and no server of its own.
   preference) are stored locally in the browser via chrome.storage.local
   and never leave the device.
 - **Prompts** you enter are filled into Google Flow's own prompt box or
-  sent to your local Rosterly backend at the address you configured
+  sent to your local Renderly backend at the address you configured
   (default: http://127.0.0.1:8022).
 - **Images** you choose to save are transferred from the Flow page to
-  your local Rosterly backend, which stores them on your own machine.
+  your local Renderly backend, which stores them on your own machine.
 
 ## Third parties
 The extension interacts with Google Flow only to perform actions you

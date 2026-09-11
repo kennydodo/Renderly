@@ -10,7 +10,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <NavLink to="/" className="brand">
-          Rosterly
+          Renderly
         </NavLink>
         <nav className="nav">
           <NavLink to="/" end>

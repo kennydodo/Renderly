@@ -27,7 +27,7 @@ IMAGE_PRICE_USD = {
     "4K": float(os.getenv("GEMINI_IMAGE_PRICE_4K_USD", "0.156")),
 }
 
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{(BASE_DIR / 'rosterly.db').as_posix()}")
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{(BASE_DIR / 'renderly.db').as_posix()}")
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 

@@ -120,7 +120,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
-      console.warn("Rosterly extension: unknown message type", msg && msg.type);
+      console.warn("Renderly extension: unknown message type", msg && msg.type);
       sendResponse({ ok: false, error: `Unknown message type: ${msg && msg.type}` });
     } catch (err) {
       sendResponse({

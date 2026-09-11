@@ -10,7 +10,7 @@ node_modules/
 dist/
 
 # Local data
-backend/rosterly.db
+backend/renderly.db
 backend/storage/*
 !backend/storage/.gitkeep
 

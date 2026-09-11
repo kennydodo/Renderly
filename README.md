@@ -1,4 +1,4 @@
-# Rosterly
+# Renderly
 
 Per-channel AI image generation studio: upload reference assets to a channel, generate single or batch images with Google Gemini, and browse full generation history.
 
@@ -8,7 +8,7 @@ Per-channel AI image generation studio: upload reference assets to a channel, ge
 ## Project layout
 
 ```
-Rosterly/
+Renderly/
 ├── backend/
 │   ├── main.py                 # FastAPI app entrypoint
 │   ├── config.py               # API key loading, settings
@@ -27,7 +27,7 @@ Rosterly/
 │   │   └── api/client.js
 │   ├── package.json
 │   └── vite.config.js
-├── extension/                  # Chrome MV3 extension bridging Google Flow → Rosterly
+├── extension/                  # Chrome MV3 extension bridging Google Flow → Renderly
 ├── start.bat / stop.bat        # One-click app launch / shutdown
 ├── .gitignore
 └── README.md
@@ -38,7 +38,7 @@ Rosterly/
 ### 1. Backend
 
 ```powershell
-cd D:\Repos\Rosterly\backend
+cd D:\Repos\Renderly\backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -50,7 +50,7 @@ Put your Gemini API key in `backend/.env` (get one at https://aistudio.google.co
 GEMINI_API_KEY=your-key-here
 ```
 
-Run the API (creates `rosterly.db` and `storage/` automatically):
+Run the API (creates `renderly.db` and `storage/` automatically):
 
 ```powershell
 uvicorn main:app --reload --port 8022
@@ -61,7 +61,7 @@ API is at http://127.0.0.1:8022, interactive docs at http://127.0.0.1:8022/docs.
 ### 2. Frontend
 
 ```powershell
-cd D:\Repos\Rosterly\frontend
+cd D:\Repos\Renderly\frontend
 npm install
 npm run dev
 ```

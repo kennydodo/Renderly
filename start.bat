@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title Rosterly Launcher
+title Renderly Launcher
 cd /d "%~dp0"
 
 echo ============================================
-echo   Rosterly - starting backend + frontend
+echo   Renderly - starting backend + frontend
 echo ============================================
 
 rem ---- Backend dependencies ----
@@ -30,12 +30,12 @@ if not exist "frontend\node_modules" (
 )
 
 echo [start] Backend  - http://127.0.0.1:8022  (docs: /docs)
-start "Rosterly Backend" cmd /k "cd /d %~dp0backend && .venv\Scripts\python.exe -m uvicorn main:app --reload --port 8022"
+start "Renderly Backend" cmd /k "cd /d %~dp0backend && .venv\Scripts\python.exe -m uvicorn main:app --reload --port 8022"
 
 echo [start] Frontend - http://localhost:5173
-start "Rosterly Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
+start "Renderly Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
 
 timeout /t 3 /nobreak >nul
 echo.
-echo Both windows launched. Close them or run stop.bat to quit Rosterly.
+echo Both windows launched. Close them or run stop.bat to quit Renderly.
 timeout /t 4 /nobreak >nul

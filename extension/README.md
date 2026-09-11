@@ -1,13 +1,13 @@
-# Flow × Rosterly (Chrome Extension)
+# Flow × Renderly (Chrome Extension)
 
-Manifest V3 extension that bridges **Google Flow** (labs.google/fx) and your local **Rosterly** app.
+Manifest V3 extension that bridges **Google Flow** (labs.google/fx) and your local **Renderly** app.
 
 ## Features
 
 - **Toolbar icon toggles the dock** — click the extension icon on a Flow tab to show/hide the floating dock (bottom-right, collapsible, ✕ closes it):
-  - **Prompt presets + your Rosterly templates** — pick one, "+ Add to master" appends it to the master prompt sent with every card.
-  - **Batch cards** — paste prompts, split into cards, generate on Flow or via the Rosterly engine; results import and download automatically.
-  - **Save last image → Rosterly** — grabs the most recent generated image and imports it into the selected channel.
+  - **Prompt presets + your Renderly templates** — pick one, "+ Add to master" appends it to the master prompt sent with every card.
+  - **Batch cards** — paste prompts, split into cards, generate on Flow or via the Renderly engine; results import and download automatically.
+  - **Save last image → Renderly** — grabs the most recent generated image and imports it into the selected channel.
   - **⚙ Backend settings** — change the backend URL if it isn't the default; opens automatically when the backend is unreachable.
 - **Default backend**: `http://127.0.0.1:8022` (changeable via the dock's ⚙ gear).
 
@@ -20,10 +20,10 @@ Manifest V3 extension that bridges **Google Flow** (labs.google/fx) and your loc
 
 ## Requirements
 
-- Rosterly backend running (`start.bat`) on `http://127.0.0.1:8022` — change it via the dock's ⚙ gear if you use a different port.
+- Renderly backend running (`start.bat`) on `http://127.0.0.1:8022` — change it via the dock's ⚙ gear if you use a different port.
 - If you change the backend URL, reload the extension afterwards (host permissions are granted per saved URL pattern).
 
 ## Notes
 
 - Flow is an SPA; the dock injects via a debounced MutationObserver and re-uses the last `≥512px` image on the page as "last generated image".
-- API calls go through the background service worker (avoids page-CORS issues). Uploads reuse Rosterly's normal `POST /api/channels/{id}/assets` endpoint, so files land in `backend/storage/{channel_id}/` like any upload.
+- API calls go through the background service worker (avoids page-CORS issues). Uploads reuse Renderly's normal `POST /api/channels/{id}/assets` endpoint, so files land in `backend/storage/{channel_id}/` like any upload.

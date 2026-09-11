@@ -261,7 +261,7 @@ def upscale(src: Path, dst: Path, scale: int) -> tuple[int, int]:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="rosterly_upscale_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="renderly_upscale_") as tmp:
         flat = _flatten_to_rgb(src, Path(tmp))
         out_tmp = Path(tmp) / "engine_out.png"
 
