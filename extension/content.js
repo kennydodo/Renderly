@@ -1069,11 +1069,15 @@ function buildDock() {
     }, 500);
   };
 
-  collapseBtn.onclick = () => {
-    const hidden = body.style.display === "none";
-    body.style.display = hidden ? "flex" : "none";
-    collapseBtn.textContent = hidden ? "–" : "+";
+  const setCollapsed = (collapsed) => {
+    body.style.display = collapsed ? "none" : "flex";
+    collapseBtn.textContent = collapsed ? "+" : "–";
+    title.style.display = collapsed ? "none" : "";
+    dock.style.width = collapsed ? "auto" : "360px";
+    dock.title = collapsed ? `Rosterly for Flow v${DOCK_VERSION}` : "";
   };
+
+  collapseBtn.onclick = () => setCollapsed(body.style.display !== "none");
 
   gearBtn.onclick = async () => {
     setSettingsOpen(!settingsOpen);
