@@ -1,5 +1,5 @@
 const DOCK_ID = "renderly-dock";
-const DOCK_VERSION = "1.9.2";
+const DOCK_VERSION = "1.9.3";
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 
 const PRESETS = [
@@ -448,10 +448,58 @@ async function copyTextToClipboard(text) {
 // A leading "NAME.png" / "NAME.jpg" token in a prompt names the output.
 const NAME_TOKEN_RE = /^\s*([\w\-]+\.(?:png|jpe?g))\s+(.*)$/i;
 
+// "images/S02_05_PROC_PV.png" → "S02_05_PROC_PV" — strips paths, quotes and
+// known image extensions, whatever form the value arrives in.
+function stemName(value) {
+  let v = String(value || "")
+    .trim()
+    .replace(/^["']|["']$/g, "");
+  v = v.split(/[\\/]/).pop() || "";
+  v = v.replace(/\.(png|jpe?g|webp)$/i, "").trim();
+  return v || null;
+}
+
+// Pull {name, prompt} out of a JSON batch entry. Accepts several field names
+// so it keeps working regardless of what is given.
+function extractFromObject(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const fileField =
+    obj.file || obj.filename || obj.file_name || obj.name || obj.image || obj.output;
+  const promptField = obj.prompt || obj.text || obj.description || obj.body || "";
+  const name = fileField ? stemName(fileField) : null;
+  const prompt = String(promptField).trim();
+  if (!name && !prompt) return null;
+  return { name, prompt };
+}
+
+// Extract the output name and the actual prompt from a card line. Handles:
+//  1. JSON lines:      { "file": "S02_05_PROC_PV.png", "prompt": "…" }
+//  2. Leading token:   "S02_05_PROC_PV.png Clean flat infographic…"
+//  3. File token anywhere: "Clean flat infographic S02_05_PROC_PV.png …"
+//  4. Anything else: the whole text is the prompt (backend auto-names it).
 function splitPromptName(text) {
-  const match = text.trim().match(NAME_TOKEN_RE);
-  if (!match || !match[2].trim()) return { name: null, prompt: text.trim() };
-  return { name: match[1], prompt: match[2].trim() };
+  const raw = String(text || "").trim();
+
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = extractFromObject(JSON.parse(raw));
+      if (parsed) return { name: parsed.name, prompt: parsed.prompt || raw };
+    } catch {
+      /* not valid JSON — fall through */
+    }
+  }
+
+  const match = raw.match(NAME_TOKEN_RE);
+  if (match && match[2].trim()) {
+    return { name: stemName(match[1]), prompt: match[2].trim() };
+  }
+
+  const anyFile = raw.match(/[\w\-]+\.(?:png|jpe?g|webp)/i);
+  if (anyFile) {
+    return { name: stemName(anyFile[0]), prompt: raw };
+  }
+
+  return { name: null, prompt: raw };
 }
 
 // Mirrors the backend's _sanitize_filename: safe for use as a download name.
@@ -1069,6 +1117,7 @@ function buildDock() {
       chrome.storage.local.set({
         savedCards: cards.map((c) => ({
           text: c.text,
+          name: c.name || null,
           done: !!c.done,
           failed: !!c.failed,
         })),
@@ -1420,14 +1469,45 @@ function buildDock() {
   };
 
   splitBtn.onclick = () => {
-    const lines = pasteTa.value
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    if (!lines.length) {
+    const raw = pasteTa.value.trim();
+    if (!raw) {
       setStatus("Paste at least one prompt line first.", true);
       return;
     }
+
+    // A JSON array of batch entries creates one card per entry, with the
+    // "file"-style field kept as the card's output name.
+    if (raw.startsWith("[")) {
+      try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          const entries = arr
+            .map((obj) => extractFromObject(obj))
+            .filter(Boolean)
+            .map((e) => ({ name: e.name, text: e.prompt || e.name || "" }));
+          if (entries.length) {
+            cards = entries.map((e) => ({
+              id: ++cardSeq,
+              text: e.text,
+              name: e.name,
+              refs: [],
+            }));
+            renderCards();
+            scheduleSaveCards();
+            pasteTa.value = "";
+            setStatus(`${cards.length} card(s) created from JSON. Review them, then Send.`);
+            return;
+          }
+        }
+      } catch {
+        /* not a JSON array — fall through to line splitting */
+      }
+    }
+
+    const lines = raw
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
     cards = lines.map((line) => ({ id: ++cardSeq, text: line, refs: [] }));
     renderCards();
     scheduleSaveCards();
@@ -1536,7 +1616,8 @@ function buildDock() {
 
   const runCard = async (card, index, total) => {
     const m = masterTa.value.trim();
-    const { name: cardName, prompt: cardPrompt } = splitPromptName(card.text.trim());
+    const { name: tokenName, prompt: cardPrompt } = splitPromptName(card.text.trim());
+    const cardName = card.name || tokenName;
     const prompt = m && cardPrompt ? `${m} ${cardPrompt}` : cardPrompt || m;
     card.displayName = cardName;
 
@@ -2034,6 +2115,7 @@ function buildDock() {
       cards = savedCards.map((c) => ({
         id: ++cardSeq,
         text: c.text || "",
+        name: c.name || null,
         refs: [],
         done: !!c.done,
         failed: !!c.failed,
