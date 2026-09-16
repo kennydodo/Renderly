@@ -1,5 +1,5 @@
 const DOCK_ID = "renderly-dock";
-const DOCK_VERSION = "1.10.0";
+const DOCK_VERSION = "1.13.0";
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 
 const PRESETS = [
@@ -247,6 +247,25 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Poll a check until it passes or the timeout elapses (resolves false).
+function waitFor(check, timeoutMs, stepMs) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      let result = false;
+      try {
+        result = check();
+      } catch {
+        result = false;
+      }
+      if (result) return resolve(true);
+      if (Date.now() > deadline) return resolve(false);
+      setTimeout(tick, stepMs);
+    };
+    tick();
+  });
+}
+
 async function waitForNewImage(beforeSet, timeoutMs, onTick) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -425,6 +444,42 @@ async function waitForContinue(titleText) {
   });
 }
 
+// Non-blocking guide toast for reference attachment: it never covers the
+// page, so the user can still click Flow's own controls while it is visible.
+function showRefToast(titleText) {
+  const panel = document.createElement("div");
+  panel.id = `${DOCK_ID}-ref-toast`;
+  panel.style.cssText = [
+    "position:fixed",
+    "bottom:24px",
+    "left:24px",
+    "z-index:100001",
+    "background:#1e1f20",
+    "border:1px solid #8ab4f8",
+    "border-radius:12px",
+    "padding:14px",
+    "max-width:320px",
+    "font-family:system-ui,sans-serif",
+    "color:#e8eaed",
+    "font-size:13px",
+    "box-shadow:0 4px 14px rgba(0,0,0,0.5)",
+  ].join(";");
+  const text = document.createElement("p");
+  text.style.cssText = "margin:0 0 10px;white-space:pre-wrap;";
+  text.textContent = titleText;
+  const done = document.createElement("button");
+  done.textContent = "Done →";
+  done.style.cssText =
+    "background:#0b57d0;color:#fff;border:none;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;";
+  panel.appendChild(text);
+  panel.appendChild(done);
+  document.body.appendChild(panel);
+  const promise = new Promise((resolve) => {
+    done.onclick = () => resolve();
+  });
+  return { promise, remove: () => panel.remove() };
+}
+
 async function copyTextToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -584,45 +639,6 @@ function buildSettingItem(title, contentEls) {
       plus.textContent = "－";
     },
   };
-}
-
-// Convert a reference (local file or Flow gallery URL) into a File object
-// that can be pushed into Flow's own upload control.
-async function refToFile(ref) {
-  if (ref.localFile) return ref.localFile;
-  const blob = await fetchImageAsBlob(ref.url);
-  return new File([blob], `${safeFileName(ref.label || "flow-ref")}.png`, {
-    type: blob.type || "image/png",
-  });
-}
-
-// Attach reference images inside Flow itself via its file upload input.
-// This keeps the whole generation inside Flow — no Gemini API involved.
-async function attachRefsToFlow(refs) {
-  const inputs = deepQueryAll('input[type="file"]').filter((el) => !isOurElement(el));
-  if (!inputs.length) {
-    return { attached: false, reason: "Flow's upload control was not found on the page" };
-  }
-  const files = [];
-  for (const ref of refs) {
-    try {
-      files.push(await refToFile(ref));
-    } catch {
-      /* skip unreadable references */
-    }
-  }
-  if (!files.length) return { attached: false, reason: "no readable reference images" };
-  try {
-    const dt = new DataTransfer();
-    files.forEach((f) => dt.items.add(f));
-    const input = inputs[inputs.length - 1];
-    input.files = dt.files;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    return { attached: true };
-  } catch (err) {
-    return { attached: false, reason: (err && err.message) || "upload failed" };
-  }
 }
 
 /* ================= Dock UI ================= */
@@ -861,6 +877,9 @@ function buildDock() {
   /* ---- global (master) reference images ---- */
 
   let masterPickerOpen = false;
+  // True once the user attached the global references in Flow this batch —
+  // the ingredient persists in the composer across generations.
+  let refsAttachedThisBatch = false;
 
   const masterRefsRow = document.createElement("div");
   masterRefsRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;";
@@ -1424,10 +1443,7 @@ function buildDock() {
       const opt = document.createElement("option");
       opt.textContent = `Backend unreachable: ${err.message}`;
       channelSelect.appendChild(opt);
-      // Surface the gear and open the backend section so the user can fix it.
-      backendInput.value = await getBackendBase();
-      setSettingsOpen(true);
-      backendSetting.open();
+      setStatus(`Backend unreachable: ${err.message} — check the ⚙ settings`);
     }
   };
 
@@ -1510,20 +1526,9 @@ function buildDock() {
     for (let v = 0; v < versions; v++) {
       const versionLabel = versions > 1 ? ` (${v + 1}/${versions})` : "";
 
-      // Attach references inside Flow (first version only — Flow keeps the
-      // uploaded ingredients for the follow-up runs of the same card).
-      const refs = [...masterRefs, ...card.refs];
-      if (refs.length && v === 0) {
-        setCardStatus(card.id, `Attaching ${refs.length} reference image(s) in Flow…`);
-        const attach = await attachRefsToFlow(refs);
-        if (!attach.attached) {
-          setCardStatus(
-            card.id,
-            `⚠ ${attach.reason} — generating without references`
-          );
-        }
-      }
-
+      // Fill the prompt BEFORE pasting references — if Flow auto-generates
+      // when an image lands in the box, it must already contain the prompt,
+      // otherwise it generates the reference image on its own.
       setCardStatus(card.id, "Filling prompt…");
       const input = getPromptInput();
       if (!input) throw new Error("Flow's prompt box not found (run Diagnose)");
@@ -1561,6 +1566,33 @@ function buildDock() {
       }
 
       const before = captureImageSet();
+
+      // References are attached MANUALLY in Flow's composer — Flow's picker
+      // cannot be filled programmatically, and the ingredient the user adds
+      // stays there and is used by every generation. The extension only
+      // guides the timing: once per batch for global references, once for any
+      // card-specific ones.
+      const unattachedCardRefs = (card.refs || []).filter((r) => !r.attachedInFlow);
+      const names = [
+        ...(masterRefs.length > 0 && !refsAttachedThisBatch
+          ? masterRefs.map((r) => r.label)
+          : []),
+        ...unattachedCardRefs.map((r) => r.label),
+      ];
+      if (names.length && v === 0) {
+        setCardStatus(card.id, "Waiting for references to be attached in Flow…");
+        const toast = showRefToast(
+          `Attach in Flow now: press "Add ingredients to the prompt box" and ` +
+            `pick: ${names.join(", ")}.\n` +
+            `The ingredient stays in the composer and is used by every prompt.\n` +
+            `Press Done when the reference(s) are attached.`
+        );
+        await toast.promise;
+        toast.remove();
+        if (masterRefs.length > 0) refsAttachedThisBatch = true;
+        unattachedCardRefs.forEach((r) => (r.attachedInFlow = true));
+      }
+
       await sleep(500);
       const gen = triggerGenerate(input);
       if (!gen.clicked) {
@@ -1611,11 +1643,13 @@ function buildDock() {
         }
       }
 
-      try {
-        const blob = await fetchImageAsBlob(img.currentSrc || img.src);
-        downloadBlob(blob, `${fileBase}.png`);
-      } catch {
-        /* gallery copy still exists */
+      if (autoUpscaleCheck.checked) {
+        try {
+          const blob = await fetchImageAsBlob(img.currentSrc || img.src);
+          downloadBlob(blob, `${fileBase}.png`);
+        } catch {
+          /* gallery copy still exists */
+        }
       }
       labels.push(label);
     }
@@ -1742,16 +1776,52 @@ function buildDock() {
       promptBox: describeEl(input),
       generateCandidates: genCandidates,
       iframes: document.querySelectorAll("iframe").length,
+      fileInputs: deepQueryAll('input[type="file"]').map((i) => ({
+        accept: i.accept || "(none)",
+        multiple: !!i.multiple,
+        visible: isVisible(i),
+      })),
+      uploadCandidates: deepQueryAll('button, [role="button"]')
+        .filter((b) => {
+          if (isOurElement(b) || !isVisible(b)) return false;
+          const label = (
+            (b.getAttribute("aria-label") || "") +
+            " " +
+            (b.getAttribute("title") || "") +
+            " " +
+            (b.textContent || "")
+          )
+            .toLowerCase()
+            .trim();
+          return /upload|attach|ingredient|add (image|media|photo|file|reference)|media|photo/.test(
+            label
+          );
+        })
+        .map((b) => describeEl(b))
+        .slice(0, 4),
     };
   }
 
   diagBtn.onclick = () => {
     const report = diagnose();
-    console.log("[Renderly diagnostics]", report);
+    console.log(
+      "[Renderly diagnostics] — copy this JSON if you report an issue:\n" +
+        JSON.stringify(report, null, 1)
+    );
+    const fileInputs = report.fileInputs.length
+      ? report.fileInputs
+          .map(
+            (f) =>
+              `${f.accept}${f.multiple ? "+multi" : ""}${f.visible ? "" : "+hidden"}`
+          )
+          .join(" | ")
+      : "none";
     setStatus(
-      `Prompt box: ${report.promptBox} · generate: ${
+      `Prompt: ${report.promptBox} · gen: ${
         report.generateCandidates.length ? report.generateCandidates.join(" | ") : "none"
-      } · iframes: ${report.iframes}`,
+      } · iframes: ${report.iframes} · fileInputs: ${fileInputs} · uploadBtns: ${
+        report.uploadCandidates.length ? report.uploadCandidates.join(" | ") : "none"
+      }`,
       report.promptBox === "null"
     );
   };
