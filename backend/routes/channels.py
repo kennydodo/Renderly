@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from config import STORAGE_DIR
 from db import get_db
-from models import Channel, Generation, Project
+from models import Channel, Generation
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -56,8 +56,6 @@ def create_channel(body: ChannelCreate, db: Session = Depends(get_db)):
     db.add(channel)
     db.commit()
     db.refresh(channel)
-    db.add(Project(channel_id=channel.id, name="Default project"))
-    db.commit()
     return channel
 
 

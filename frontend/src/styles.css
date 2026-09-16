@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg: #0a0c13;
   --panel: #12151f;
   --card: #171b29;
@@ -1154,71 +1154,74 @@ button.ref-pick.on {
   min-width: 0;
 }
 
-/* Projects section in the channel sidebar */
-.side-section {
+/* Projects grid on the channel page */
+.project-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin-bottom: 12px;
+  min-width: 0;
+  transition:
+    border-color 0.18s ease,
+    transform 0.18s ease,
+    box-shadow 0.18s ease;
 }
-.side-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--muted);
-  padding: 0 12px 4px;
-}
-.side-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-}
-.side-row.on {
-  background: linear-gradient(180deg, rgba(124, 154, 255, 0.16), rgba(124, 154, 255, 0.06));
+.project-card:hover {
   border-color: rgba(124, 154, 255, 0.45);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.32);
 }
-.side-btn {
-  flex: 1;
+.project-open {
+  display: block;
+  width: 100%;
   min-width: 0;
   text-align: left;
   background: transparent;
   border: none;
-  color: var(--muted);
-  padding: 8px 4px 8px 12px;
+  box-shadow: none;
+  padding: 0;
+  color: inherit;
   cursor: pointer;
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.side-row:hover .side-btn,
-.side-row.on .side-btn {
-  color: var(--text);
-}
-.side-x {
-  flex: none;
+.project-open:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+  filter: none;
   background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  padding: 0 8px;
-  font-size: 11px;
 }
-.side-x:hover {
-  color: var(--danger);
+.project-name {
+  display: block;
+  font-weight: 600;
+  font-size: 0.98rem;
+  overflow-wrap: anywhere;
+  padding-right: 3.2rem;
 }
-.proj-new {
-  display: flex;
-  gap: 4px;
-  margin-top: 4px;
+.project-open .muted {
+  display: block;
+  margin-top: 0.2rem;
 }
-.proj-new input {
-  padding: 6px 8px;
-  font-size: 12px;
+.project-del {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  opacity: 0;
+  transition: opacity 0.15s ease;
 }
-.proj-add {
+.project-card:hover .project-del,
+.project-del:focus-visible {
+  opacity: 1;
+}
+.project-new {
+  gap: 0.6rem;
+}
+.project-new h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.project-new input {
+  width: 100%;
   flex: none;
-  padding: 6px 10px;
+}
+.project-new button {
+  width: 100%;
+  margin-top: 0;
 }

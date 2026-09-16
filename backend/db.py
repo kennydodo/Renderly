@@ -1,9 +1,17 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from config import DATABASE_URL
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+
+@event.listens_for(engine, "connect")
+def _enable_sqlite_fk(dbapi_conn, _):
+    """SQLite ignores foreign keys unless this pragma is enabled."""
+    dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -27,14 +35,11 @@ _MIGRATIONS = (
 _DATA_MIGRATIONS = (
     # Failed generations are auto-hidden; sweep up any older rows.
     "UPDATE generations SET hidden = 1 WHERE status = 'error'",
-    # Every channel gets a default project (created by create_all above).
-    "INSERT INTO projects (channel_id, name, created_at) "
-    "SELECT c.id, 'Default project', CURRENT_TIMESTAMP FROM channels c "
-    "WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.channel_id = c.id)",
-    # Existing generations belong to their channel's default project.
-    "UPDATE generations SET project_id = ("
-    "SELECT p.id FROM projects p WHERE p.channel_id = generations.channel_id "
-    "ORDER BY p.id LIMIT 1) WHERE project_id IS NULL",
+    # Remove the auto-created default projects — their generations become
+    # unassigned and live in the channel's "Unsorted" view instead.
+    "UPDATE generations SET project_id = NULL WHERE project_id NOT IN "
+    "(SELECT id FROM projects)",
+    "DELETE FROM projects WHERE name = 'Default project'",
 )
 
 

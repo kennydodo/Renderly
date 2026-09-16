@@ -25,6 +25,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<ChannelList />} />
           <Route path="/channels/:channelId" element={<ChannelWorkspace />} />
+          <Route path="/channels/:channelId/projects/:projectId" element={<ChannelWorkspace />} />
           <Route path="/history" element={<History />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>

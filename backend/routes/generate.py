@@ -141,6 +141,7 @@ class GenerationOut(BaseModel):
     cost_usd: float
     hidden: bool
     category: str = "image"
+    project_id: int | None = None
     batch_id: str | None
     aspect_ratio: str
     ref_strength: str

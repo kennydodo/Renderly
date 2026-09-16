@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client.js";
 import BatchGenerateForm from "../components/BatchGenerateForm.jsx";
@@ -8,11 +8,11 @@ import PromptForm from "../components/PromptForm.jsx";
 import ReferencePicker from "../components/ReferencePicker.jsx";
 
 export default function ChannelWorkspace() {
-  const { channelId } = useParams();
+  const { channelId, projectId: routeProjectId } = useParams();
+  const navigate = useNavigate();
   const [channels, setChannels] = useState([]);
   const [channel, setChannel] = useState(null);
   const [projects, setProjects] = useState([]);
-  const [projectId, setProjectId] = useState(null);
   const [newProjectName, setNewProjectName] = useState("");
   const [assets, setAssets] = useState([]);
   const [generations, setGenerations] = useState([]);
@@ -43,7 +43,11 @@ export default function ChannelWorkspace() {
         await Promise.all([
           api.listChannels(),
           api.listProjects(channelId).catch(() => []),
-          api.listGenerations({ channelId, projectId }),
+          api.listGenerations({
+            channelId,
+            projectId: routeProjectId === "unassigned" ? undefined : routeProjectId,
+            hidden: "all",
+          }),
           api.listTemplates(channelId).catch(() => []),
           api.spendSummary({ channelId }).catch(() => null),
           api.upscaleStatus().catch(() => ({ available: false })),
@@ -51,10 +55,6 @@ export default function ChannelWorkspace() {
       setChannels(channelList);
       setChannel(channelList.find((c) => String(c.id) === channelId) || null);
       setProjects(projectList);
-      setProjectId((current) => {
-        const found = projectList.find((p) => String(p.id) === String(current));
-        return found ? found.id : projectList[0]?.id ?? null;
-      });
       setGenerations(generationData);
       setTemplates(templateData);
       setSpend(spendData);
@@ -63,7 +63,7 @@ export default function ChannelWorkspace() {
     } catch (err) {
       setError(err.message);
     }
-  }, [channelId, projectId]);
+  }, [channelId, routeProjectId]);
 
   const loadAssets = useCallback(async (channelIdToLoad) => {
     try {
@@ -100,6 +100,12 @@ export default function ChannelWorkspace() {
     }, 300);
     return () => clearTimeout(searchTimer.current);
   }, [refsSource, gallerySearch]);
+
+  // Opening a project lands on the composer; the library is one click
+  // away in the sidebar.
+  useEffect(() => {
+    if (routeProjectId) setView("create");
+  }, [routeProjectId]);
 
   if (!channel) {
     return <p className="muted">{error || "Loading…"}</p>;
@@ -142,7 +148,7 @@ export default function ChannelWorkspace() {
         prompt,
         asset_ids: selectedRefs.filter((r) => r.type === "asset").map((r) => r.id),
         generation_ids: selectedRefs.filter((r) => r.type === "generation").map((r) => r.id),
-        project_id: projectId || undefined,
+        project_id: unassignedView ? undefined : routeProjectId || undefined,
         aspect_ratio: aspect_ratio || aspectRatio,
         ref_strength: ref_strength || refStrength,
       });
@@ -161,7 +167,7 @@ export default function ChannelWorkspace() {
         items,
         asset_ids: selectedRefs.filter((r) => r.type === "asset").map((r) => r.id),
         generation_ids: selectedRefs.filter((r) => r.type === "generation").map((r) => r.id),
-        project_id: projectId || undefined,
+        project_id: unassignedView ? undefined : routeProjectId || undefined,
         aspect_ratio: aspect_ratio || aspectRatio,
         ref_strength: ref_strength || refStrength,
         image_size: image_size || "1K",
@@ -182,18 +188,23 @@ export default function ChannelWorkspace() {
       const project = await api.createProject(channelId, name);
       setNewProjectName("");
       await load();
-      setProjectId(project.id);
-      setView("all");
+      navigate(`/channels/${channelId}/projects/${project.id}`);
     } catch (err) {
       setError(err.message);
     }
   };
 
   const handleDeleteProject = async (id) => {
-    if (!window.confirm("Delete this project? Its generations move to another project of this channel.")) return;
+    if (
+      !window.confirm(
+        "Delete this project? Its generations move to another project of this channel.",
+      )
+    )
+      return;
     try {
       await api.deleteProject(id);
       await load();
+      navigate(`/channels/${channelId}`);
     } catch (err) {
       setError(err.message);
     }
@@ -268,232 +279,286 @@ export default function ChannelWorkspace() {
     .filter((r) => r.type === "generation")
     .map((r) => r.id);
 
+  const isProjectView = Boolean(routeProjectId);
+  const unassignedView = routeProjectId === "unassigned";
+  const project = projects.find((p) => String(p.id) === String(routeProjectId)) || null;
+  const projectGenerations = unassignedView
+    ? generations.filter((g) => g.project_id == null)
+    : isProjectView
+      ? generations.filter((g) => String(g.project_id) === String(routeProjectId))
+      : [];
+  const unassignedCount = generations.filter((g) => g.project_id == null).length;
+  const projectCounts = {};
+  generations.forEach((g) => {
+    if (g.project_id != null) {
+      projectCounts[g.project_id] = (projectCounts[g.project_id] || 0) + 1;
+    }
+  });
+
   return (
     <section>
-        <div className="workspace-header">
-          <div>
-            <h1>{channel.name}</h1>
-            {channel.description && <p className="muted">{channel.description}</p>}
-            {spend && (
-              <p className="muted small">
-                Est. spend: ${spend.total_usd.toFixed(2)} · {spend.image_count} image
-                {spend.image_count === 1 ? "" : "s"}
-                {spend.failed_count > 0 && ` · ${spend.failed_count} failed`}
-                {spend.prices &&
-                  ` · $${spend.prices["1K"].toFixed(3)}/1K, $${spend.prices["2K"].toFixed(
-                    3,
-                  )}/2K, $${spend.prices["4K"].toFixed(3)}/4K each`}
-              </p>
-            )}
-          </div>
-          <a className="ghost-btn" href={api.exportChannelUrl(channelId)}>
-            ⬇ Export images (.zip)
-          </a>
+      <div className="workspace-header">
+        <div>
+          <button
+            type="button"
+            className="ghost-btn"
+            style={{ marginBottom: "0.5rem" }}
+            onClick={() => navigate(isProjectView ? `/channels/${channelId}` : "/")}
+          >
+            {isProjectView ? "← Projects" : "← Channels"}
+          </button>
+          <h1>{unassignedView ? "Unsorted images" : isProjectView ? project?.name || "Project" : channel.name}</h1>
+          {!isProjectView && channel.description && <p className="muted">{channel.description}</p>}
+          {spend && (
+            <p className="muted small">
+              Est. spend: ${spend.total_usd.toFixed(2)} · {spend.image_count} image
+              {spend.image_count === 1 ? "" : "s"}
+              {spend.failed_count > 0 && ` · ${spend.failed_count} failed`}
+              {spend.prices &&
+                ` · $${spend.prices["1K"].toFixed(3)}/1K, $${spend.prices["2K"].toFixed(
+                  3,
+                )}/2K, $${spend.prices["4K"].toFixed(3)}/4K each`}
+            </p>
+          )}
         </div>
+        <a className="ghost-btn" href={api.exportChannelUrl(channelId)}>
+          ⬇ Export images (.zip)
+        </a>
+      </div>
       {error && <p className="error">{error}</p>}
 
-      <div className="channel-layout">
-        <aside className="media-sidebar">
-          <div className="side-section">
-            <div className="side-title">Projects</div>
+      {!isProjectView ? (
+        <>
+          <h2 style={{ marginTop: 0 }}>Projects in {channel.name}</h2>
+          <div className="grid cards">
             {projects.map((p) => (
-              <div
-                key={p.id}
-                className={`side-row${String(projectId) === String(p.id) ? " on" : ""}`}
-              >
-                <button className="side-btn" title="Open project" onClick={() => setProjectId(p.id)}>
-                  📁 {p.name}
+              <div key={p.id} className="card project-card">
+                <button
+                  type="button"
+                  className="project-open"
+                  onClick={() => navigate(`/channels/${channelId}/projects/${p.id}`)}
+                >
+                  <span className="project-name">📁 {p.name}</span>
+                  <span className="muted small">
+                    {projectCounts[p.id] || 0} generation
+                    {(projectCounts[p.id] || 0) === 1 ? "" : "s"}
+                  </span>
                 </button>
                 {projects.length > 1 && (
-                  <span
-                    className="side-x"
+                  <button
+                    type="button"
+                    className="danger tiny project-del"
                     title="Delete project (generations move to another project)"
                     onClick={() => handleDeleteProject(p.id)}
                   >
-                    ✕
-                  </span>
+                    🗑 Delete
+                  </button>
                 )}
               </div>
             ))}
-            <div className="proj-new">
+            {unassignedCount > 0 && (
+              <div className="card project-card">
+                <button
+                  type="button"
+                  className="project-open"
+                  onClick={() => navigate(`/channels/${channelId}/projects/unassigned`)}
+                >
+                  <span className="project-name">🗂 Unsorted</span>
+                  <span className="muted small">
+                    {unassignedCount} generation{unassignedCount === 1 ? "" : "s"}
+                  </span>
+                </button>
+              </div>
+            )}
+            <div className="card project-card project-new">
+              <h3>New project</h3>
               <input
                 value={newProjectName}
                 onChange={(e) => setNewProjectName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleCreateProject()}
-                placeholder="New project name"
+                placeholder="e.g. Episode 12 — Winter Forest"
               />
               <button
                 type="button"
-                className="proj-add"
                 onClick={handleCreateProject}
                 disabled={!newProjectName.trim()}
-                title="Create project"
               >
-                ＋
+                ＋ Create project
               </button>
             </div>
           </div>
+        </>
+      ) : (
+        <div className="channel-layout">
+          <aside className="media-sidebar">
+            <button className={view === "create" ? "on" : ""} onClick={() => setView("create")}>
+              🎨 Create
+            </button>
+            <button className={view === "all" ? "on" : ""} onClick={() => setView("all")}>
+              🖼 All media ({projectGenerations.length})
+            </button>
+            <button className={view === "image" ? "on" : ""} onClick={() => setView("image")}>
+              📷 Images (
+              {
+                projectGenerations.filter((g) => (g.category || "image") === "image").length
+              }
+              )
+            </button>
+            <button
+              className={view === "character" ? "on" : ""}
+              onClick={() => setView("character")}
+            >
+              👤 Characters (
+              {projectGenerations.filter((g) => g.category === "character").length})
+            </button>
+            <button className={view === "video" ? "on" : ""} onClick={() => setView("video")}>
+              🎬 Videos ({projectGenerations.filter((g) => g.category === "video").length})
+            </button>
+          </aside>
 
-          <button className={view === "create" ? "on" : ""} onClick={() => setView("create")}>
-            🎨 Create
-          </button>
-          <button className={view === "all" ? "on" : ""} onClick={() => setView("all")}>
-            🖼 All media ({generations.length})
-          </button>
-          <button className={view === "image" ? "on" : ""} onClick={() => setView("image")}>
-            📷 Images ({generations.filter((g) => (g.category || "image") === "image").length})
-          </button>
-          <button
-            className={view === "character" ? "on" : ""}
-            onClick={() => setView("character")}
-          >
-            👤 Characters ({generations.filter((g) => g.category === "character").length})
-          </button>
-          <button className={view === "video" ? "on" : ""} onClick={() => setView("video")}>
-            🎬 Videos ({generations.filter((g) => g.category === "video").length})
-          </button>
-        </aside>
+          <div className="channel-main">
+            {view !== "create" && (
+              <h2>
+                {view === "all"
+                  ? "All media"
+                  : view === "image"
+                    ? "Images"
+                    : view === "character"
+                      ? "Characters"
+                      : "Videos"}
+              </h2>
+            )}
 
-        <div className="channel-main">
-          {view !== "create" && (
-            <h2>
-              {view === "all"
-                ? "All media"
-                : view === "image"
-                  ? "Images"
-                  : view === "character"
-                    ? "Characters"
-                    : "Videos"}
-            </h2>
-          )}
-
-          {view === "create" ? (
-            <>
-              <div className="panel" style={{ marginBottom: "1.25rem" }}>
-                <h2>Reference images</h2>
-                <p className="muted small">
-                  Attached references are used by every generation below.
-                </p>
-                <ReferencePicker
-                  channels={channels}
-                  currentChannelId={channelId}
-                  assets={assets}
-                  selectedRefs={selectedRefs}
-                  onToggleRef={toggleRef}
-                  onUpload={handleUpload}
-                  onDeleteAsset={handleDeleteAsset}
-                  uploading={uploading}
-                  refsSource={refsSource}
-                  setRefsSource={setRefsSource}
-                  refChannelId={refChannelId}
-                  setRefChannelId={setRefChannelId}
-                  galleryItems={galleryItems}
-                  gallerySearch={gallerySearch}
-                  setGallerySearch={setGallerySearch}
-                  galleryLoading={galleryLoading}
-                />
-              </div>
-
-              <div className="panel">
-                <h2>Generate</h2>
-                <p className="muted">
-                  {selectedRefs.length} reference{selectedRefs.length === 1 ? "" : "s"} selected.
-                </p>
-                {!batchOpen ? (
-                  <PromptForm
-                    onGenerate={handleGenerate}
-                    generating={generating}
-                    channelId={channelId}
-                    templates={templates}
-                    onDeleteTemplate={handleDeleteTemplate}
-                  />
-                ) : (
-                  <p className="muted hint">
-                    Single-prompt form hidden while batch mode is active.
+            {view === "create" ? (
+              <>
+                <div className="panel" style={{ marginBottom: "1.25rem" }}>
+                  <h2>Reference images</h2>
+                  <p className="muted small">
+                    Attach once — these references are used by every generation in this
+                    project. You can also pick from other projects and channels.
                   </p>
-                )}
-                <BatchGenerateForm
-                  onGenerateBatch={handleGenerateBatch}
-                  generating={generating}
-                  open={batchOpen}
-                  onOpenChange={setBatchOpen}
-                  channelId={channelId}
-                />
+                  <ReferencePicker
+                    channels={channels}
+                    currentChannelId={channelId}
+                    assets={assets}
+                    selectedRefs={selectedRefs}
+                    onToggleRef={toggleRef}
+                    onUpload={handleUpload}
+                    onDeleteAsset={handleDeleteAsset}
+                    uploading={uploading}
+                    refsSource={refsSource}
+                    setRefsSource={setRefsSource}
+                    refChannelId={refChannelId}
+                    setRefChannelId={setRefChannelId}
+                    galleryItems={galleryItems}
+                    gallerySearch={gallerySearch}
+                    setGallerySearch={setGallerySearch}
+                    galleryLoading={galleryLoading}
+                  />
+                </div>
 
-                <label className="field-label">Recent generations</label>
-                {generations.length === 0 ? (
-                  <p className="muted small">Nothing generated yet.</p>
-                ) : (
-                  <div className="recent-strip">
-                    {generations.slice(0, 10).map((g) =>
-                      g.image_url ? (
-                        <img
-                          key={g.id}
-                          src={g.image_url}
-                          alt={g.name || g.prompt}
-                          title={`${g.name || g.prompt} — click to use as reference`}
-                          onClick={() =>
-                            toggleRef({
-                              type: "generation",
-                              id: g.id,
-                              url: g.image_url,
-                              label: g.name || g.prompt,
-                            })
-                          }
+                <div className="panel">
+                  <h2>Generate</h2>
+                  <p className="muted">
+                    {selectedRefs.length} reference{selectedRefs.length === 1 ? "" : "s"}{" "}
+                    selected.
+                  </p>
+                  {!batchOpen ? (
+                    <PromptForm
+                      onGenerate={handleGenerate}
+                      generating={generating}
+                      channelId={channelId}
+                      templates={templates}
+                      onDeleteTemplate={handleDeleteTemplate}
+                    />
+                  ) : (
+                    <p className="muted hint">
+                      Single-prompt form hidden while batch mode is active.
+                    </p>
+                  )}
+                  <BatchGenerateForm
+                    onGenerateBatch={handleGenerateBatch}
+                    generating={generating}
+                    open={batchOpen}
+                    onOpenChange={setBatchOpen}
+                    channelId={channelId}
+                  />
+
+                  <label className="field-label">Recent generations</label>
+                  {projectGenerations.length === 0 ? (
+                    <p className="muted small">Nothing generated yet.</p>
+                  ) : (
+                    <div className="recent-strip">
+                      {projectGenerations.slice(0, 10).map((g) =>
+                        g.image_url ? (
+                          <img
+                            key={g.id}
+                            src={g.image_url}
+                            alt={g.name || g.prompt}
+                            title={`${g.name || g.prompt} — click to use as reference`}
+                            onClick={() =>
+                              toggleRef({
+                                type: "generation",
+                                id: g.id,
+                                url: g.image_url,
+                                label: g.name || g.prompt,
+                              })
+                            }
+                          />
+                        ) : (
+                          <span key={g.id} className="muted small" title="failed">
+                            ✕
+                          </span>
+                        ),
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                {(() => {
+                  const visible = projectGenerations.filter(
+                    (g) => view === "all" || (g.category || "image") === view,
+                  );
+                  if (visible.length === 0) {
+                    return <p className="muted">Nothing here yet.</p>;
+                  }
+                  return (
+                    <div className="grid images">
+                      {visible.map((generation) => (
+                        <ImageCard
+                          key={generation.id}
+                          generation={generation}
+                          channels={channels}
+                          selected={selectedGenerationIds.includes(generation.id)}
+                          onSelect={(id) => {
+                            const gen = projectGenerations.find((g) => g.id === id);
+                            if (gen) {
+                              toggleRef({
+                                type: "generation",
+                                id: gen.id,
+                                url: gen.image_url,
+                                label: gen.name || gen.prompt,
+                              });
+                            }
+                          }}
+                          onRename={handleRename}
+                          onSaveToChannel={handleSaveToChannel}
+                          onRegenerate={handleRegenerate}
+                          onHide={handleHide}
+                          onUpscale={upscalerAvailable ? handleUpscale : null}
+                          onSetCategory={handleSetCategory}
                         />
-                      ) : (
-                        <span key={g.id} className="muted small" title="failed">
-                          ✕
-                        </span>
-                      ),
-                    )}
-                  </div>
-                )}
-              </div>
-            </>
-          ) : (
-            <>
-              {(() => {
-                const visible = generations.filter(
-                  (g) => view === "all" || (g.category || "image") === view,
-                );
-                if (visible.length === 0) {
-                  return <p className="muted">Nothing here yet.</p>;
-                }
-                return (
-                  <div className="grid images">
-                    {visible.map((generation) => (
-                      <ImageCard
-                        key={generation.id}
-                        generation={generation}
-                        channels={channels}
-                        selected={selectedGenerationIds.includes(generation.id)}
-                        onSelect={(id) => {
-                          const gen = generations.find((g) => g.id === id);
-                          if (gen) {
-                            toggleRef({
-                              type: "generation",
-                              id: gen.id,
-                              url: gen.image_url,
-                              label: gen.name || gen.prompt,
-                            });
-                          }
-                        }}
-                        onRename={handleRename}
-                        onSaveToChannel={handleSaveToChannel}
-                        onRegenerate={handleRegenerate}
-                        onHide={handleHide}
-                        onUpscale={upscalerAvailable ? handleUpscale : null}
-                        onSetCategory={handleSetCategory}
-                      />
-                    ))}
-                  </div>
-                );
-              })()}
-            </>
-          )}
+                      ))}
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }
