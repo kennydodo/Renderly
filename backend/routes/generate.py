@@ -109,6 +109,7 @@ class BatchGenerateRequest(BaseModel):
 class GenerationPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     hidden: bool | None = None
+    category: str | None = None  # image | character | video
 
 
 class RegenerateRequest(BaseModel):
@@ -137,6 +138,7 @@ class GenerationOut(BaseModel):
     error: str | None
     cost_usd: float
     hidden: bool
+    category: str = "image"
     batch_id: str | None
     aspect_ratio: str
     ref_strength: str
@@ -479,6 +481,10 @@ def patch_generation(
         generation.name = body.name.strip()
     if body.hidden is not None:
         generation.hidden = body.hidden
+    if body.category is not None:
+        if body.category not in ("image", "character", "video"):
+            raise HTTPException(status_code=400, detail="Invalid category")
+        generation.category = body.category
     db.commit()
     db.refresh(generation)
     return generation
@@ -719,6 +725,7 @@ def list_generations(
     date_to: str | None = None,
     status: str | None = None,
     hidden: str | None = None,
+    category: str | None = None,
     limit: int = 50,
     db: Session = Depends(get_db),
 ):
@@ -731,6 +738,9 @@ def list_generations(
         pass
     else:
         query = query.where(Generation.hidden == False)  # noqa: E712
+
+    if category in ("image", "character", "video"):
+        query = query.where(Generation.category == category)
 
     if channel_id is not None:
         query = query.where(Generation.channel_id == channel_id)

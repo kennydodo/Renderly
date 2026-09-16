@@ -99,6 +99,7 @@ export const api = {
     if (params.dateFrom) search.set("date_from", params.dateFrom);
     if (params.dateTo) search.set("date_to", params.dateTo);
     if (params.hidden) search.set("hidden", params.hidden);
+    if (params.category) search.set("category", params.category);
     if (params.limit) search.set("limit", params.limit);
     const query = search.toString();
     return request(`/api/generations${query ? `?${query}` : ""}`);

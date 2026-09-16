@@ -12,6 +12,7 @@ export default function ImageCard({
   onRegenerate,
   onHide,
   onUpscale,
+  onSetCategory,
 }) {
   const [lightbox, setLightbox] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -165,6 +166,24 @@ export default function ImageCard({
                 <button className="overlay-btn" onClick={() => setSaveOpen((v) => !v)}>
                   Save to channel
                 </button>
+                {onSetCategory && (
+                  <button
+                    className="overlay-btn"
+                    title={
+                      generation.category === "character"
+                        ? "Remove from Characters"
+                        : "Add to Characters — reusable reference for future prompts"
+                    }
+                    onClick={() =>
+                      onSetCategory(
+                        generation.id,
+                        generation.category === "character" ? "image" : "character",
+                      )
+                    }
+                  >
+                    {generation.category === "character" ? "👤 Unset" : "👤 Character"}
+                  </button>
+                )}
                 <a
                   href={generation.image_url}
                   download={downloadName}

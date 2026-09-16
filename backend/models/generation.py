@@ -29,6 +29,8 @@ class Generation(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_usd: Mapped[float] = mapped_column(default=0.0)
     hidden: Mapped[bool] = mapped_column(default=False)
+    # Media organization (Flow-style tabs): image | character | video
+    category: Mapped[str] = mapped_column(String(20), default="image")
     batch_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

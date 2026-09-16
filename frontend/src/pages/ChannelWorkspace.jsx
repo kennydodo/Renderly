@@ -20,6 +20,7 @@ export default function ChannelWorkspace() {
   const [galleryItems, setGalleryItems] = useState([]);
   const [gallerySearch, setGallerySearch] = useState("");
   const [galleryLoading, setGalleryLoading] = useState(false);
+  const [view, setView] = useState("create");
 
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -189,6 +190,15 @@ export default function ChannelWorkspace() {
     }
   };
 
+  const handleSetCategory = async (id, category) => {
+    try {
+      await api.patchGeneration(id, { category });
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
   const handleUpscale = async (id, scale) => {
     try {
       await api.upscaleGeneration(id, scale);
@@ -246,88 +256,165 @@ export default function ChannelWorkspace() {
         </div>
       {error && <p className="error">{error}</p>}
 
-      <div className="workspace">
-        <div className="panel">
-          <h2>Reference images</h2>
-          <ReferencePicker
-            channels={channels}
-            currentChannelId={channelId}
-            assets={assets}
-            selectedRefs={selectedRefs}
-            onToggleRef={toggleRef}
-            onUpload={handleUpload}
-            onDeleteAsset={handleDeleteAsset}
-            uploading={uploading}
-            refsSource={refsSource}
-            setRefsSource={setRefsSource}
-            refChannelId={refChannelId}
-            setRefChannelId={setRefChannelId}
-            galleryItems={galleryItems}
-            gallerySearch={gallerySearch}
-            setGallerySearch={setGallerySearch}
-            galleryLoading={galleryLoading}
-          />
-        </div>
+      <div className="channel-layout">
+        <aside className="media-sidebar">
+          <button className={view === "create" ? "on" : ""} onClick={() => setView("create")}>
+            🎨 Create
+          </button>
+          <button className={view === "all" ? "on" : ""} onClick={() => setView("all")}>
+            🖼 All media ({generations.length})
+          </button>
+          <button className={view === "image" ? "on" : ""} onClick={() => setView("image")}>
+            📷 Images ({generations.filter((g) => (g.category || "image") === "image").length})
+          </button>
+          <button
+            className={view === "character" ? "on" : ""}
+            onClick={() => setView("character")}
+          >
+            👤 Characters ({generations.filter((g) => g.category === "character").length})
+          </button>
+          <button className={view === "video" ? "on" : ""} onClick={() => setView("video")}>
+            🎬 Videos ({generations.filter((g) => g.category === "video").length})
+          </button>
+        </aside>
 
-        <div className="panel">
-          <h2>Generate</h2>
-          <p className="muted">
-            {selectedRefs.length} reference{selectedRefs.length === 1 ? "" : "s"} selected.
-          </p>
-          {!batchOpen ? (
-            <PromptForm
-              onGenerate={handleGenerate}
-              generating={generating}
-              channelId={channelId}
-              templates={templates}
-              onDeleteTemplate={handleDeleteTemplate}
-            />
-          ) : (
-            <p className="muted hint">
-              Single-prompt form hidden while batch mode is active.
-            </p>
+        <div className="channel-main">
+          {view !== "create" && (
+            <h2>
+              {view === "all"
+                ? "All media"
+                : view === "image"
+                  ? "Images"
+                  : view === "character"
+                    ? "Characters"
+                    : "Videos"}
+            </h2>
           )}
-          <BatchGenerateForm
-            onGenerateBatch={handleGenerateBatch}
-            generating={generating}
-            open={batchOpen}
-            onOpenChange={setBatchOpen}
-            channelId={channelId}
-          />
+
+          {view === "create" ? (
+            <div className="workspace">
+              <div className="panel">
+                <h2>Reference images</h2>
+                <ReferencePicker
+                  channels={channels}
+                  currentChannelId={channelId}
+                  assets={assets}
+                  selectedRefs={selectedRefs}
+                  onToggleRef={toggleRef}
+                  onUpload={handleUpload}
+                  onDeleteAsset={handleDeleteAsset}
+                  uploading={uploading}
+                  refsSource={refsSource}
+                  setRefsSource={setRefsSource}
+                  refChannelId={refChannelId}
+                  setRefChannelId={setRefChannelId}
+                  galleryItems={galleryItems}
+                  gallerySearch={gallerySearch}
+                  setGallerySearch={setGallerySearch}
+                  galleryLoading={galleryLoading}
+                />
+              </div>
+
+              <div className="panel">
+                <h2>Generate</h2>
+                <p className="muted">
+                  {selectedRefs.length} reference{selectedRefs.length === 1 ? "" : "s"} selected.
+                </p>
+                {!batchOpen ? (
+                  <PromptForm
+                    onGenerate={handleGenerate}
+                    generating={generating}
+                    channelId={channelId}
+                    templates={templates}
+                    onDeleteTemplate={handleDeleteTemplate}
+                  />
+                ) : (
+                  <p className="muted hint">
+                    Single-prompt form hidden while batch mode is active.
+                  </p>
+                )}
+                <BatchGenerateForm
+                  onGenerateBatch={handleGenerateBatch}
+                  generating={generating}
+                  open={batchOpen}
+                  onOpenChange={setBatchOpen}
+                  channelId={channelId}
+                />
+
+                <label className="field-label">Recent generations</label>
+                {generations.length === 0 ? (
+                  <p className="muted small">Nothing generated yet.</p>
+                ) : (
+                  <div className="recent-strip">
+                    {generations.slice(0, 10).map((g) =>
+                      g.image_url ? (
+                        <img
+                          key={g.id}
+                          src={g.image_url}
+                          alt={g.name || g.prompt}
+                          title={`${g.name || g.prompt} — click to use as reference`}
+                          onClick={() =>
+                            toggleRef({
+                              type: "generation",
+                              id: g.id,
+                              url: g.image_url,
+                              label: g.name || g.prompt,
+                            })
+                          }
+                        />
+                      ) : (
+                        <span key={g.id} className="muted small" title="failed">
+                          ✕
+                        </span>
+                      ),
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <>
+              {(() => {
+                const visible = generations.filter(
+                  (g) => view === "all" || (g.category || "image") === view,
+                );
+                if (visible.length === 0) {
+                  return <p className="muted">Nothing here yet.</p>;
+                }
+                return (
+                  <div className="grid images">
+                    {visible.map((generation) => (
+                      <ImageCard
+                        key={generation.id}
+                        generation={generation}
+                        channels={channels}
+                        selected={selectedGenerationIds.includes(generation.id)}
+                        onSelect={(id) => {
+                          const gen = generations.find((g) => g.id === id);
+                          if (gen) {
+                            toggleRef({
+                              type: "generation",
+                              id: gen.id,
+                              url: gen.image_url,
+                              label: gen.name || gen.prompt,
+                            });
+                          }
+                        }}
+                        onRename={handleRename}
+                        onSaveToChannel={handleSaveToChannel}
+                        onRegenerate={handleRegenerate}
+                        onHide={handleHide}
+                        onUpscale={upscalerAvailable ? handleUpscale : null}
+                        onSetCategory={handleSetCategory}
+                      />
+                    ))}
+                  </div>
+                );
+              })()}
+            </>
+          )}
         </div>
       </div>
-
-      <h2>Latest generations</h2>
-      {generations.length === 0 ? (
-        <p className="muted">Nothing generated yet.</p>
-      ) : (
-        <div className="grid images">
-          {generations.map((generation) => (
-            <ImageCard
-              key={generation.id}
-              generation={generation}
-              channels={channels}
-              selected={selectedGenerationIds.includes(generation.id)}
-              onSelect={(id) => {
-                const gen = generations.find((g) => g.id === id);
-                if (gen) {
-                  toggleRef({
-                    type: "generation",
-                    id: gen.id,
-                    url: gen.image_url,
-                    label: gen.name || gen.prompt,
-                  });
-                }
-              }}
-              onRename={handleRename}
-              onSaveToChannel={handleSaveToChannel}
-              onRegenerate={handleRegenerate}
-              onHide={handleHide}
-              onUpscale={upscalerAvailable ? handleUpscale : null}
-            />
-          ))}
-        </div>
-      )}
     </section>
   );
 }

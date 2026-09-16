@@ -20,6 +20,7 @@ _MIGRATIONS = (
     "ALTER TABLE generations ADD COLUMN cost_usd FLOAT NOT NULL DEFAULT 0",
     "ALTER TABLE generations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE generations ADD COLUMN image_size VARCHAR(20) NOT NULL DEFAULT '1K'",
+    "ALTER TABLE generations ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'image'",
 )
 
 _DATA_MIGRATIONS = (
