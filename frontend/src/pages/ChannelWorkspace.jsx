@@ -75,11 +75,12 @@ export default function ChannelWorkspace() {
     clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(async () => {
       try {
+        // The picker only needs the LATEST 20 generations (newest first).
         setGalleryItems(
           await api.listGenerations({
             search: gallerySearch || undefined,
             status: "done",
-            limit: 60,
+            limit: 20,
           }),
         );
         setGalleryLoading(false);

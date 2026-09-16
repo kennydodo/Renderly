@@ -101,6 +101,7 @@ export const api = {
     if (params.hidden) search.set("hidden", params.hidden);
     if (params.category) search.set("category", params.category);
     if (params.limit) search.set("limit", params.limit);
+    if (params.offset) search.set("offset", params.offset);
     const query = search.toString();
     return request(`/api/generations${query ? `?${query}` : ""}`);
   },

@@ -727,9 +727,11 @@ def list_generations(
     hidden: str | None = None,
     category: str | None = None,
     limit: int = 50,
+    offset: int = 0,
     db: Session = Depends(get_db),
 ):
     limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     query = select(Generation).order_by(Generation.created_at.desc())
 
     if hidden == "only":
@@ -762,7 +764,7 @@ def list_generations(
             raise HTTPException(status_code=400, detail="date_to must be YYYY-MM-DD")
         query = query.where(Generation.created_at < end)
 
-    return list(db.scalars(query.limit(limit)).all())
+    return list(db.scalars(query.limit(limit).offset(offset)).all())
 
 
 @router.get("/generations/{generation_id}", response_model=GenerationOut)
