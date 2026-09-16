@@ -292,9 +292,12 @@ export default function ChannelWorkspace() {
           )}
 
           {view === "create" ? (
-            <div className="workspace">
-              <div className="panel">
+            <>
+              <div className="panel" style={{ marginBottom: "1.25rem" }}>
                 <h2>Reference images</h2>
+                <p className="muted small">
+                  Attached references are used by every generation below.
+                </p>
                 <ReferencePicker
                   channels={channels}
                   currentChannelId={channelId}
@@ -371,7 +374,7 @@ export default function ChannelWorkspace() {
                   </div>
                 )}
               </div>
-            </div>
+            </>
           ) : (
             <>
               {(() => {
