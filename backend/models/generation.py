@@ -31,6 +31,9 @@ class Generation(Base):
     hidden: Mapped[bool] = mapped_column(default=False)
     # Media organization (Flow-style tabs): image | character | video
     category: Mapped[str] = mapped_column(String(20), default="image")
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     batch_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

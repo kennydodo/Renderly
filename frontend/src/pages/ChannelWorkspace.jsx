@@ -11,6 +11,9 @@ export default function ChannelWorkspace() {
   const { channelId } = useParams();
   const [channels, setChannels] = useState([]);
   const [channel, setChannel] = useState(null);
+  const [projects, setProjects] = useState([]);
+  const [projectId, setProjectId] = useState(null);
+  const [newProjectName, setNewProjectName] = useState("");
   const [assets, setAssets] = useState([]);
   const [generations, setGenerations] = useState([]);
 
@@ -36,16 +39,22 @@ export default function ChannelWorkspace() {
 
   const load = useCallback(async () => {
     try {
-      const [channelList, generationData, templateData, spendData, upscaleData] =
+      const [channelList, projectList, generationData, templateData, spendData, upscaleData] =
         await Promise.all([
           api.listChannels(),
-          api.listGenerations({ channelId }),
+          api.listProjects(channelId).catch(() => []),
+          api.listGenerations({ channelId, projectId }),
           api.listTemplates(channelId).catch(() => []),
           api.spendSummary({ channelId }).catch(() => null),
           api.upscaleStatus().catch(() => ({ available: false })),
         ]);
       setChannels(channelList);
       setChannel(channelList.find((c) => String(c.id) === channelId) || null);
+      setProjects(projectList);
+      setProjectId((current) => {
+        const found = projectList.find((p) => String(p.id) === String(current));
+        return found ? found.id : projectList[0]?.id ?? null;
+      });
       setGenerations(generationData);
       setTemplates(templateData);
       setSpend(spendData);
@@ -54,7 +63,7 @@ export default function ChannelWorkspace() {
     } catch (err) {
       setError(err.message);
     }
-  }, [channelId]);
+  }, [channelId, projectId]);
 
   const loadAssets = useCallback(async (channelIdToLoad) => {
     try {
@@ -133,6 +142,7 @@ export default function ChannelWorkspace() {
         prompt,
         asset_ids: selectedRefs.filter((r) => r.type === "asset").map((r) => r.id),
         generation_ids: selectedRefs.filter((r) => r.type === "generation").map((r) => r.id),
+        project_id: projectId || undefined,
         aspect_ratio: aspect_ratio || aspectRatio,
         ref_strength: ref_strength || refStrength,
       });
@@ -151,6 +161,7 @@ export default function ChannelWorkspace() {
         items,
         asset_ids: selectedRefs.filter((r) => r.type === "asset").map((r) => r.id),
         generation_ids: selectedRefs.filter((r) => r.type === "generation").map((r) => r.id),
+        project_id: projectId || undefined,
         aspect_ratio: aspect_ratio || aspectRatio,
         ref_strength: ref_strength || refStrength,
         image_size: image_size || "1K",
@@ -161,6 +172,30 @@ export default function ChannelWorkspace() {
       setError(err.message);
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const handleCreateProject = async () => {
+    const name = newProjectName.trim();
+    if (!name) return;
+    try {
+      const project = await api.createProject(channelId, name);
+      setNewProjectName("");
+      await load();
+      setProjectId(project.id);
+      setView("all");
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleDeleteProject = async (id) => {
+    if (!window.confirm("Delete this project? Its generations move to another project of this channel.")) return;
+    try {
+      await api.deleteProject(id);
+      await load();
+    } catch (err) {
+      setError(err.message);
     }
   };
 
@@ -259,6 +294,46 @@ export default function ChannelWorkspace() {
 
       <div className="channel-layout">
         <aside className="media-sidebar">
+          <div className="side-section">
+            <div className="side-title">Projects</div>
+            {projects.map((p) => (
+              <div
+                key={p.id}
+                className={`side-row${String(projectId) === String(p.id) ? " on" : ""}`}
+              >
+                <button className="side-btn" title="Open project" onClick={() => setProjectId(p.id)}>
+                  📁 {p.name}
+                </button>
+                {projects.length > 1 && (
+                  <span
+                    className="side-x"
+                    title="Delete project (generations move to another project)"
+                    onClick={() => handleDeleteProject(p.id)}
+                  >
+                    ✕
+                  </span>
+                )}
+              </div>
+            ))}
+            <div className="proj-new">
+              <input
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleCreateProject()}
+                placeholder="New project name"
+              />
+              <button
+                type="button"
+                className="proj-add"
+                onClick={handleCreateProject}
+                disabled={!newProjectName.trim()}
+                title="Create project"
+              >
+                ＋
+              </button>
+            </div>
+          </div>
+
           <button className={view === "create" ? "on" : ""} onClick={() => setView("create")}>
             🎨 Create
           </button>

@@ -92,9 +92,23 @@ export const api = {
   upscaleAsset: (id, scale = 2) =>
     request(`/api/assets/${id}/upscale`, { method: "POST", body: JSON.stringify({ scale }) }),
   upscaleStatus: () => request("/api/upscale/status"),
+  listProjects: (channelId) =>
+    request(`/api/projects?channel_id=${channelId}`),
+  createProject: (channelId, name) =>
+    request("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ channel_id: Number(channelId), name }),
+    }),
+  updateProject: (id, name) =>
+    request(`/api/projects/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }),
+  deleteProject: (id) => request(`/api/projects/${id}`, { method: "DELETE" }),
   listGenerations: (params = {}) => {
     const search = new URLSearchParams();
     if (params.channelId != null) search.set("channel_id", params.channelId);
+    if (params.projectId != null) search.set("project_id", params.projectId);
     if (params.search) search.set("search", params.search);
     if (params.dateFrom) search.set("date_from", params.dateFrom);
     if (params.dateTo) search.set("date_to", params.dateTo);

@@ -21,7 +21,7 @@ from config import (
     STORAGE_DIR,
 )
 from db import get_db
-from models import Asset, Channel, Generation
+from models import Asset, Channel, Generation, Project
 from services import gemini_client, thumbs, upscaler
 
 router = APIRouter(prefix="/api", tags=["generate"])
@@ -84,6 +84,7 @@ class GenerateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     asset_ids: list[int] = Field(default_factory=list)
     generation_ids: list[int] = Field(default_factory=list)
+    project_id: int | None = None
     aspect_ratio: AspectRatio = "16:9"
     ref_strength: RefStrength = "balanced"
     image_size: ImageSize = DEFAULT_IMAGE_SIZE
@@ -100,6 +101,7 @@ class BatchGenerateRequest(BaseModel):
     items: list[BatchItem] = Field(min_length=1)
     asset_ids: list[int] = Field(default_factory=list)
     generation_ids: list[int] = Field(default_factory=list)
+    project_id: int | None = None
     aspect_ratio: AspectRatio = "16:9"
     ref_strength: RefStrength = "balanced"
     image_size: ImageSize = DEFAULT_IMAGE_SIZE
@@ -230,6 +232,13 @@ def _auto_name(prompt: str) -> str:
     return name or "Untitled"
 
 
+def _default_project_id(db: Session, channel_id: int) -> int | None:
+    """First project created for the channel (imports land there by default)."""
+    return db.scalar(
+        select(Project.id).where(Project.channel_id == channel_id).order_by(Project.id)
+    )
+
+
 def _create_generation(
     db: Session,
     channel: Channel,
@@ -241,9 +250,11 @@ def _create_generation(
     ref_generation_ids: list[int],
     batch_id: str | None = None,
     name: str | None = None,
+    project_id: int | None = None,
 ) -> Generation:
     generation = Generation(
         channel_id=channel.id,
+        project_id=project_id,
         prompt=prompt,
         name=(name or "").strip(),
         model=GEMINI_IMAGE_MODEL,
@@ -317,10 +328,11 @@ def _run_single(
     ref_generation_ids: list[int],
     batch_id: str | None = None,
     name: str | None = None,
+    project_id: int | None = None,
 ) -> Generation:
     generation = _create_generation(
         db, channel, prompt, aspect_ratio, ref_strength, image_size,
-        ref_asset_ids, ref_generation_ids, batch_id, name,
+        ref_asset_ids, ref_generation_ids, batch_id, name, project_id,
     )
     try:
         image_bytes = _produce_image(prompt, references, aspect_ratio, ref_strength, image_size)
@@ -352,6 +364,7 @@ def generate_single(
         body.asset_ids,
         body.generation_ids,
         name=name,
+        project_id=body.project_id,
     )
 
 
@@ -400,6 +413,7 @@ def generate_batch(
         generation = _create_generation(
             db, channel, clean_prompt, body.aspect_ratio, body.ref_strength,
             body.image_size, ref_a, ref_g, batch_id, item_name,
+            project_id=body.project_id,
         )
         jobs.append((generation, refs))
 
@@ -465,6 +479,7 @@ def regenerate_generation(
         image_size,
         ref_asset_ids,
         ref_generation_ids,
+        project_id=source.project_id,
     )
 
 
@@ -578,6 +593,7 @@ def _upscaled_generation(
     width, height = upscaler.upscale(src_path, out_path, scale)
     generation = Generation(
         channel_id=source.channel_id,
+        project_id=source.project_id,
         name=f"{base_name} ({scale}x)",
         prompt=source.prompt,
         model=upscaler.engine_label(scale),
@@ -659,6 +675,7 @@ async def import_generation(
         filename = stored_name
     generation = Generation(
         channel_id=channel.id,
+        project_id=_default_project_id(db, channel.id),
         name=display_name,
         prompt=prompt_text,
         model="google-flow-import",
@@ -726,6 +743,7 @@ def list_generations(
     status: str | None = None,
     hidden: str | None = None,
     category: str | None = None,
+    project_id: int | None = None,
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -743,6 +761,9 @@ def list_generations(
 
     if category in ("image", "character", "video"):
         query = query.where(Generation.category == category)
+
+    if project_id is not None:
+        query = query.where(Generation.project_id == project_id)
 
     if channel_id is not None:
         query = query.where(Generation.channel_id == channel_id)

@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import STORAGE_DIR
 from db import Base, ensure_schema, engine
-from routes import assets, channels, generate, templates
+from routes import assets, channels, generate, projects, templates
 
 import models  # noqa: F401  (registers models on Base metadata)
 
@@ -36,6 +36,7 @@ app.add_middleware(
 app.mount("/storage", StaticFiles(directory=STORAGE_DIR), name="storage")
 
 app.include_router(channels.router)
+app.include_router(projects.router)
 app.include_router(assets.router)
 app.include_router(generate.router)
 app.include_router(templates.router)

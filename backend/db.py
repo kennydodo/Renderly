@@ -21,11 +21,20 @@ _MIGRATIONS = (
     "ALTER TABLE generations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE generations ADD COLUMN image_size VARCHAR(20) NOT NULL DEFAULT '1K'",
     "ALTER TABLE generations ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'image'",
+    "ALTER TABLE generations ADD COLUMN project_id INTEGER",
 )
 
 _DATA_MIGRATIONS = (
     # Failed generations are auto-hidden; sweep up any older rows.
     "UPDATE generations SET hidden = 1 WHERE status = 'error'",
+    # Every channel gets a default project (created by create_all above).
+    "INSERT INTO projects (channel_id, name, created_at) "
+    "SELECT c.id, 'Default project', CURRENT_TIMESTAMP FROM channels c "
+    "WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.channel_id = c.id)",
+    # Existing generations belong to their channel's default project.
+    "UPDATE generations SET project_id = ("
+    "SELECT p.id FROM projects p WHERE p.channel_id = generations.channel_id "
+    "ORDER BY p.id LIMIT 1) WHERE project_id IS NULL",
 )
 
 

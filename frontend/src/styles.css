@@ -1153,3 +1153,72 @@ button.ref-pick.on {
   flex: 1;
   min-width: 0;
 }
+
+/* Projects section in the channel sidebar */
+.side-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+}
+.side-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  padding: 0 12px 4px;
+}
+.side-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+.side-row.on {
+  background: linear-gradient(180deg, rgba(124, 154, 255, 0.16), rgba(124, 154, 255, 0.06));
+  border-color: rgba(124, 154, 255, 0.45);
+}
+.side-btn {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 8px 4px 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-row:hover .side-btn,
+.side-row.on .side-btn {
+  color: var(--text);
+}
+.side-x {
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.side-x:hover {
+  color: var(--danger);
+}
+.proj-new {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.proj-new input {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.proj-add {
+  flex: none;
+  padding: 6px 10px;
+}
