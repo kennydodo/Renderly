@@ -39,6 +39,12 @@ export default function ImageCard({
   const isDone = generation.status === "done" && generation.image_url;
   const statusClass = isDone ? "done" : generation.status;
   const displayName = generation.name || `generation-${generation.id}`;
+  // Clean download name: strip the stored ".png" suffix and the " (4x)"
+  // marker from upscaled copies — matches the extension's naming.
+  const downloadName = `${(displayName || `generation-${generation.id}`)
+    .replace(/\.(png|jpe?g|webp)$/i, "")
+    .replace(/\s*\(\d+x\)\s*/i, "")
+    .trim()}.png`;
   const sizeLabel = { "1K": "720p", "2K": "1080p", "4K": "4K" }[generation.image_size] || generation.image_size;
 
   const commitRename = () => {
@@ -161,7 +167,7 @@ export default function ImageCard({
                 </button>
                 <a
                   href={generation.image_url}
-                  download={`${displayName}.png`}
+                  download={downloadName}
                   className="overlay-btn"
                 >
                   Download
@@ -266,7 +272,7 @@ export default function ImageCard({
               {regenerateButton}
               <a
                 href={generation.image_url}
-                download={`${displayName}.png`}
+                download={downloadName}
                 className="overlay-btn"
               >
                 Save / Download
