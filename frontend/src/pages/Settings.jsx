@@ -6,6 +6,7 @@ export default function Settings() {
   const [channels, setChannels] = useState([]);
   const [removingId, setRemovingId] = useState(null);
   const [hiddenItems, setHiddenItems] = useState([]);
+  const [deletingAll, setDeletingAll] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -65,6 +66,30 @@ export default function Settings() {
     }
   };
 
+  const deleteAllHidden = async () => {
+    if (
+      !window.confirm(
+        `Permanently delete ALL ${hiddenItems.length} hidden image(s) from the database and disk? This cannot be undone.`,
+      )
+    )
+      return;
+    setDeletingAll(true);
+    try {
+      // Delete in passes — the listing is capped at 100 per call, so large
+      // cleanups continue until nothing is hidden anymore.
+      for (;;) {
+        const batch = await api.listGenerations({ hidden: "only", limit: 100 });
+        if (!batch.length) break;
+        await Promise.all(batch.map((item) => api.deleteGeneration(item.id)));
+      }
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingAll(false);
+    }
+  };
+
   return (
     <section>
       <h1>Settings</h1>
@@ -107,7 +132,21 @@ export default function Settings() {
         </div>
       )}
 
-      <h2>Hidden images ({hiddenItems.length})</h2>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+        }}
+      >
+        <h2>Hidden images ({hiddenItems.length})</h2>
+        {hiddenItems.length > 0 && (
+          <button className="danger" onClick={deleteAllHidden} disabled={deletingAll}>
+            {deletingAll ? "Deleting…" : "Delete all hidden"}
+          </button>
+        )}
+      </div>
       <p className="muted">
         Failed generations land here automatically. Successful images you removed from the
         gallery live here too — restore them or delete them permanently.

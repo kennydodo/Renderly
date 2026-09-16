@@ -1,5 +1,5 @@
 const DOCK_ID = "renderly-dock";
-const DOCK_VERSION = "1.13.0";
+const DOCK_VERSION = "1.13.1";
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 
 const PRESETS = [
@@ -1963,6 +1963,45 @@ function buildDock() {
     setStatus("Renderly reset — the dock is back to its initial state.");
   };
   settingsPanel.appendChild(resetBtn);
+
+  const delHiddenBtn = document.createElement("button");
+  delHiddenBtn.textContent = "🗑 Delete hidden images";
+  delHiddenBtn.title =
+    "Permanently deletes every image you hid in this channel (files + records). Cannot be undone.";
+  delHiddenBtn.style.cssText =
+    "background:#5c1a1a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;";
+  delHiddenBtn.onclick = async () => {
+    if (!channelSelect.value) {
+      setStatus("Pick a channel first.", true);
+      return;
+    }
+    delHiddenBtn.disabled = true;
+    let deleted = 0;
+    try {
+      // Loop until the channel has no hidden images left — the listing is
+      // capped at 200 per call, so large cleanups take several passes.
+      for (;;) {
+        const gens = await backendJson(
+          `/api/generations?channel_id=${channelSelect.value}&hidden=only&limit=200`
+        );
+        if (!gens.length) break;
+        for (const g of gens) {
+          await backendJson(`/api/generations/${g.id}`, { method: "DELETE" });
+          deleted++;
+        }
+      }
+      setStatus(
+        deleted > 0
+          ? `Deleted ${deleted} hidden image(s) from this channel.`
+          : "No hidden images in this channel."
+      );
+    } catch (err) {
+      setStatus(`Delete failed: ${err.message}`, true);
+    } finally {
+      delHiddenBtn.disabled = false;
+    }
+  };
+  settingsPanel.appendChild(delHiddenBtn);
 
   body.appendChild(masterLabel);
   body.appendChild(masterTa);
