@@ -306,8 +306,10 @@ button.link {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 0.5rem;
   color: var(--muted);
   font-size: 0.9rem;
 }
@@ -1108,6 +1110,27 @@ button.ref-pick.on {
 }
 .recent-strip img:hover {
   border-color: var(--accent);
+}
+.recent-failed {
+  width: 96px;
+  height: 72px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 122, 122, 0.08);
+  border: 1px dashed rgba(255, 122, 122, 0.45);
+  border-radius: 8px;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 0.9rem;
+  box-shadow: none;
+}
+.recent-failed:hover:not(:disabled) {
+  transform: none;
+  background: rgba(255, 122, 122, 0.16);
+  box-shadow: none;
+  filter: none;
 }
 .recent-empty {
   color: var(--muted);

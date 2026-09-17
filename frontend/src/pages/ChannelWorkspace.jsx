@@ -144,7 +144,7 @@ export default function ChannelWorkspace() {
   const handleGenerate = async ({ prompt, aspect_ratio, ref_strength }) => {
     setGenerating(true);
     try {
-      await api.generate(channelId, {
+      const generation = await api.generate(channelId, {
         prompt,
         asset_ids: selectedRefs.filter((r) => r.type === "asset").map((r) => r.id),
         generation_ids: selectedRefs.filter((r) => r.type === "generation").map((r) => r.id),
@@ -152,6 +152,7 @@ export default function ChannelWorkspace() {
         aspect_ratio: aspect_ratio || aspectRatio,
         ref_strength: ref_strength || refStrength,
       });
+      if (generation.status === "error") setError(generation.error || "Generation failed");
       await load();
     } catch (err) {
       setError(err.message);
@@ -163,7 +164,7 @@ export default function ChannelWorkspace() {
   const handleGenerateBatch = async ({ items, aspect_ratio, ref_strength, image_size, parallel }) => {
     setGenerating(true);
     try {
-      await api.generateBatch(channelId, {
+      const rows = await api.generateBatch(channelId, {
         items,
         asset_ids: selectedRefs.filter((r) => r.type === "asset").map((r) => r.id),
         generation_ids: selectedRefs.filter((r) => r.type === "generation").map((r) => r.id),
@@ -173,6 +174,14 @@ export default function ChannelWorkspace() {
         image_size: image_size || "1K",
         parallel: Boolean(parallel),
       });
+      const failed = rows.filter((r) => r.status === "error");
+      if (failed.length > 0) {
+        setError(
+          failed.some((r) => (r.error || "").includes("quota/billing limit"))
+            ? "Quota/billing limit reached — the batch was stopped. Retry the failed images manually."
+            : `${failed.length} of ${rows.length} generations failed.`,
+        );
+      }
       await load();
     } catch (err) {
       setError(err.message);
@@ -213,6 +222,16 @@ export default function ChannelWorkspace() {
   const handleRegenerate = async (id, body = {}) => {
     try {
       await api.regenerate(id, body);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleRetry = async (id) => {
+    try {
+      const generation = await api.retryGeneration(id);
+      if (generation.status === "error") setError(generation.error || "Retry failed");
       await load();
     } catch (err) {
       setError(err.message);
@@ -506,9 +525,15 @@ export default function ChannelWorkspace() {
                             }
                           />
                         ) : (
-                          <span key={g.id} className="muted small" title="failed">
+                          <button
+                            key={g.id}
+                            type="button"
+                            className="recent-failed"
+                            title="Failed — click to retry"
+                            onClick={() => handleRetry(g.id)}
+                          >
                             ✕
-                          </span>
+                          </button>
                         ),
                       )}
                     </div>
@@ -546,6 +571,7 @@ export default function ChannelWorkspace() {
                           onRename={handleRename}
                           onSaveToChannel={handleSaveToChannel}
                           onRegenerate={handleRegenerate}
+                          onRetry={handleRetry}
                           onHide={handleHide}
                           onUpscale={upscalerAvailable ? handleUpscale : null}
                           onSetCategory={handleSetCategory}

@@ -82,6 +82,7 @@ Open http://localhost:5173. The Vite dev server proxies `/api` and `/storage` to
 | POST | `/api/channels/{id}/generate` | Single generation `{ prompt, asset_ids?, generation_ids?, aspect_ratio? ("16:9" default), ref_strength? }` |
 | POST | `/api/channels/{id}/generate/batch` | Batch `{ items: [{ prompt, asset_ids?, generation_ids? }], asset_ids?, generation_ids?, aspect_ratio?, ref_strength?, parallel? }` — item refs override the main refs; rows without refs use the main ones |
 | POST | `/api/generations/{id}/regenerate` | Re-run a generation with its stored prompt, refs, ratio and strength |
+| POST | `/api/generations/{id}/retry` | Manually retry a **failed** generation in place (same row, no auto-retries) |
 | PATCH | `/api/generations/{id}` | Rename a generation |
 | POST | `/api/generations/{id}/save-as-asset` | Copy a generated image into a channel's assets |
 | GET | `/api/generations?channel_id=&search=&date_from=&date_to=&status=&limit=` | Generation history (search matches name or prompt) |
@@ -91,6 +92,8 @@ Images are served at `/storage/{channel_id}/{filename}.png`.
 
 ## Notes
 
+- **No automatic retries.** If a request fails it is marked failed; retry it manually with the **↻ Retry** button on the failed card (or the ✕ in Recent generations).
+- **Quota/billing limit:** when Google returns `429 RESOURCE_EXHAUSTED` (or a billing/403 refusal), generation stops immediately — the rest of a batch is marked *Skipped* and nothing further is sent. Failed and skipped images can be retried manually once the limit resets.
 - The image model defaults to `gemini-3.1-flash-image` (nano banana 2); override with `GEMINI_IMAGE_MODEL` in `.env`.
 - Aspect ratios: `1:1`, `16:9` (default), `9:16`, `4:3`, `3:4`.
 - Resolutions: `1K` (default, 1376×768 at 16:9), `2K` (2752×1536), `4K` (5504×3072).

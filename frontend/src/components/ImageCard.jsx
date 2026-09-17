@@ -10,6 +10,7 @@ export default function ImageCard({
   onRename,
   onSaveToChannel,
   onRegenerate,
+  onRetry,
   onHide,
   onUpscale,
   onSetCategory,
@@ -22,6 +23,7 @@ export default function ImageCard({
   const [regenPrompt, setRegenPrompt] = useState(null);
   const [regenDraft, setRegenDraft] = useState("");
   const [upscaling, setUpscaling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
     setDraftName(generation.name);
@@ -92,6 +94,18 @@ export default function ImageCard({
     }
   };
 
+  const handleRetry = async () => {
+    if (!onRetry || retrying) return;
+    setRetrying(true);
+    try {
+      await onRetry(generation.id);
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const isFailed = generation.status === "error";
+
   const upscaleButtons = onUpscale ? (
     <div className="overlay-actions upscale-row">
       <button
@@ -125,13 +139,26 @@ export default function ImageCard({
             <img src={generation.image_url} alt={generation.prompt} loading="lazy" />
           ) : (
             <div className="image-placeholder">
-              {generation.status === "error" ? "Failed" : "Generating…"}
+              {isFailed ? "Failed" : "Generating…"}
+              {isFailed && onRetry && (
+                <button
+                  type="button"
+                  className="overlay-btn"
+                  disabled={retrying}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRetry();
+                  }}
+                >
+                  {retrying ? "Retrying…" : "↻ Retry"}
+                </button>
+              )}
             </div>
           )}
 
           {!isDone && (
-            <span className={`badge${generation.status === "error" ? " error" : ""}`}>
-              {generation.status === "error" ? "Failed" : "Pending"}
+            <span className={`badge${isFailed ? " error" : ""}`}>
+              {isFailed ? "Failed" : "Pending"}
             </span>
           )}
 

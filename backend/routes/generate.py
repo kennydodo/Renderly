@@ -1,9 +1,11 @@
 import io
 import json
 import re
+import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
+from itertools import islice
 from pathlib import Path
 
 from typing import Literal
@@ -23,6 +25,7 @@ from config import (
 from db import get_db
 from models import Asset, Channel, Generation, Project
 from services import gemini_client, thumbs, upscaler
+from services.gemini_client import QuotaExceededError
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
@@ -317,6 +320,19 @@ def _fail_generation(db: Session, generation: Generation, exc: Exception) -> Non
     db.refresh(generation)
 
 
+class _BatchSkipped(Exception):
+    """Raised in a worker that must not call the API (batch already stopped)."""
+
+
+def _skip_generation(db: Session, generation: Generation) -> None:
+    """Mark a batch row that was never attempted because the quota ran out."""
+    generation.status = "error"
+    generation.error = "Skipped — batch stopped: quota/billing limit reached"
+    generation.hidden = True
+    db.commit()
+    db.refresh(generation)
+
+
 def _run_single(
     db: Session,
     channel: Channel,
@@ -419,27 +435,62 @@ def generate_batch(
         jobs.append((generation, refs))
 
     if body.parallel and len(jobs) > 1:
+        # Hard stop: jobs are submitted on demand, so once the quota is hit
+        # no further request is ever sent to the API.
+        stop = threading.Event()
+        pending_jobs = iter(jobs)
+
+        def guarded_produce(prompt, refs):
+            if stop.is_set():
+                raise _BatchSkipped()
+            return _produce_image(
+                prompt, refs, body.aspect_ratio, body.ref_strength, body.image_size
+            )
+
+        in_flight: dict = {}
         with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
-            futures = {
-                pool.submit(
-                    _produce_image, gen.prompt, refs, body.aspect_ratio, body.ref_strength,
-                    body.image_size,
-                ): gen
-                for gen, refs in jobs
-            }
-            for future in as_completed(futures):
-                generation = futures[future]
-                try:
-                    _complete_generation(db, generation, future.result())
-                except Exception as exc:  # noqa: BLE001
-                    _fail_generation(db, generation, exc)
+
+            def submit_next(n):
+                # Resolve gen.prompt HERE (main thread) - Generation objects
+                # must not be touched from worker threads.
+                for gen, refs in islice(pending_jobs, n):
+                    in_flight[pool.submit(guarded_produce, gen.prompt, refs)] = gen
+
+            submit_next(min(4, len(jobs)))
+            while in_flight:
+                done_futures, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in done_futures:
+                    generation = in_flight.pop(future)
+                    try:
+                        _complete_generation(db, generation, future.result())
+                    except _BatchSkipped:
+                        _skip_generation(db, generation)
+                    except QuotaExceededError as exc:
+                        _fail_generation(db, generation, exc)
+                        stop.set()
+                    except Exception as exc:  # noqa: BLE001
+                        _fail_generation(db, generation, exc)
+                if not stop.is_set():
+                    submit_next(len(done_futures))
+            # Rows never submitted because the batch was stopped:
+            for gen, _ in pending_jobs:
+                _skip_generation(db, gen)
     else:
+        quota_stopped = False
         for generation, refs in jobs:
+            if quota_stopped:
+                # Quota/billing limit hit: never send another request.
+                _skip_generation(db, generation)
+                continue
             try:
                 image_bytes = _produce_image(
                     generation.prompt, refs, body.aspect_ratio, body.ref_strength, body.image_size
                 )
                 _complete_generation(db, generation, image_bytes)
+            except QuotaExceededError as exc:
+                # Fail this row, then stop the whole batch immediately.
+                _fail_generation(db, generation, exc)
+                quota_stopped = True
             except Exception as exc:  # noqa: BLE001
                 _fail_generation(db, generation, exc)
 
@@ -482,6 +533,39 @@ def regenerate_generation(
         ref_generation_ids,
         project_id=source.project_id,
     )
+
+
+@router.post("/generations/{generation_id}/retry", response_model=GenerationOut)
+def retry_generation(generation_id: int, db: Session = Depends(get_db)):
+    """Manually re-run a failed generation in place (no auto-retries exist)."""
+    generation = db.get(Generation, generation_id)
+    if generation is None:
+        raise HTTPException(status_code=404, detail="Generation not found")
+    if generation.status != "error":
+        raise HTTPException(status_code=400, detail="Only failed generations can be retried")
+
+    # Reset the same row so history keeps one entry for this prompt.
+    generation.status = "pending"
+    generation.error = None
+    generation.hidden = False
+    db.commit()
+    db.refresh(generation)
+
+    ref_asset_ids = json.loads(generation.ref_asset_ids or "[]")
+    ref_generation_ids = json.loads(generation.ref_generation_ids or "[]")
+    try:
+        references = _load_reference_bytes(db, ref_asset_ids, ref_generation_ids)
+        image_bytes = _produce_image(
+            generation.prompt,
+            references,
+            generation.aspect_ratio,
+            generation.ref_strength,
+            generation.image_size,
+        )
+        _complete_generation(db, generation, image_bytes)
+    except Exception as exc:  # noqa: BLE001 - persist any failure on the row
+        _fail_generation(db, generation, exc)
+    return generation
 
 
 @router.patch("/generations/{generation_id}", response_model=GenerationOut)

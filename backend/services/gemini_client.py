@@ -1,7 +1,6 @@
 """Thin wrapper around the google-genai SDK for image generation."""
 
 import logging
-import time
 
 from google import genai
 from google.genai import types
@@ -12,7 +11,12 @@ logger = logging.getLogger(__name__)
 
 _client: genai.Client | None = None
 
-MAX_ATTEMPTS = 3
+
+class QuotaExceededError(RuntimeError):
+    """Google rejected the request because a quota/billing limit is hit.
+
+    Fatal by design: never retried, and it aborts the rest of a batch.
+    """
 
 
 def get_client() -> genai.Client:
@@ -27,37 +31,17 @@ def get_client() -> genai.Client:
     return _client
 
 
-def _is_rate_limit(exc: Exception) -> bool:
-    text = str(exc).lower()
+def _is_quota_error(exc: Exception) -> bool:
+    """True when the failure means 'stop generating' (quota or billing)."""
     code = getattr(exc, "code", None)
-    return "429" in text or "resource_exhausted" in text or "rate limit" in text or code == 429
-
-
-def _retry_delay(exc: Exception, attempt: int) -> float:
-    # Honor Google's suggested delay when present, else exponential backoff.
-    text = str(exc)
-    marker = "retry in"
-    idx = text.lower().find(marker)
-    if idx != -1:
-        tail = text[idx + len(marker):].strip().split()
-        if tail:
-            try:
-                return max(1.0, min(60.0, float(tail[0].rstrip("s"))))
-            except ValueError:
-                pass
-    return 2.0 * (2 ** attempt)
-
-
-def get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        if not GEMINI_API_KEY:
-            raise RuntimeError(
-                "GEMINI_API_KEY is not set. Add it to backend/.env "
-                "(get a key at https://aistudio.google.com/apikey)."
-            )
-        _client = genai.Client(api_key=GEMINI_API_KEY)
-    return _client
+    text = str(exc).lower()
+    if code == 429 or "429" in text or "resource_exhausted" in text:
+        return True
+    if "quota" in text or "rate limit" in text:
+        return True
+    # 403 means the account side refused (billing disabled, key restricted) —
+    # retrying cannot help, so stop.
+    return code == 403 or ("billing" in text and "403" in text)
 
 
 def generate_image(
@@ -72,6 +56,8 @@ def generate_image(
     subject/style references for the model.
     aspect_ratio: optional "1:1", "16:9", "9:16", "4:3", "3:4".
     image_size: optional "1K", "2K", "4K".
+
+    No automatic retries: a failed request is retried manually by the user.
     """
     client = get_client()
 
@@ -91,26 +77,19 @@ def generate_image(
             image_config=types.ImageConfig(**image_config_kwargs)
         )
 
-    response = None
-    last_exc: Exception | None = None
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_IMAGE_MODEL,
-                contents=contents,
-                config=config,
-            )
-            break
-        except Exception as exc:  # noqa: BLE001 - retry transient rate limits
-            if not _is_rate_limit(exc) or attempt == MAX_ATTEMPTS - 1:
-                raise
-            delay = _retry_delay(exc, attempt)
-            logger.warning("Rate limited, retrying in %.1fs (attempt %d)", delay, attempt + 1)
-            time.sleep(delay)
-            last_exc = exc
-
-    if response is None:
-        raise last_exc or RuntimeError("Image generation failed")
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_IMAGE_MODEL,
+            contents=contents,
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - classify before surfacing
+        if _is_quota_error(exc):
+            logger.warning("Quota/billing limit hit: %s", exc)
+            raise QuotaExceededError(
+                f"Quota/billing limit reached — generation stopped. ({exc})"
+            ) from exc
+        raise
 
     for part in response.parts:
         inline = getattr(part, "inline_data", None)

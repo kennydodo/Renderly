@@ -66,6 +66,7 @@ export const api = {
     }),
   regenerate: (id, body = {}) =>
     request(`/api/generations/${id}/regenerate`, { method: "POST", body: JSON.stringify(body) }),
+  retryGeneration: (id) => request(`/api/generations/${id}/retry`, { method: "POST" }),
   patchGeneration: (id, body) =>
     request(`/api/generations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteGeneration: (id) => request(`/api/generations/${id}`, { method: "DELETE" }),
