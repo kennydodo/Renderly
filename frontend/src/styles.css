@@ -1111,26 +1111,47 @@ button.ref-pick.on {
 .recent-strip img:hover {
   border-color: var(--accent);
 }
-.recent-failed {
-  width: 96px;
-  height: 72px;
+.recent-item {
+  position: relative;
   flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 122, 122, 0.08);
-  border: 1px dashed rgba(255, 122, 122, 0.45);
-  border-radius: 8px;
-  color: var(--danger);
-  cursor: pointer;
-  font-size: 0.9rem;
-  box-shadow: none;
 }
-.recent-failed:hover:not(:disabled) {
+.recent-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  box-shadow: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.recent-item:hover .recent-remove {
+  opacity: 1;
+}
+.recent-remove:hover:not(:disabled) {
   transform: none;
-  background: rgba(255, 122, 122, 0.16);
+  background: rgba(255, 122, 122, 0.85);
   box-shadow: none;
   filter: none;
+}
+.failed-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+.overlay-btn.danger {
+  background: rgba(255, 122, 122, 0.12);
+  border-color: rgba(255, 122, 122, 0.5);
+  color: var(--danger);
+}
+.overlay-btn.danger:hover:not(:disabled) {
+  background: rgba(255, 122, 122, 0.22);
 }
 .recent-empty {
   color: var(--muted);

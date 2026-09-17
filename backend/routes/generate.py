@@ -114,6 +114,7 @@ class BatchGenerateRequest(BaseModel):
 class GenerationPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     hidden: bool | None = None
+    recent_removed: bool | None = None
     category: str | None = None  # image | character | video
 
 
@@ -143,6 +144,7 @@ class GenerationOut(BaseModel):
     error: str | None
     cost_usd: float
     hidden: bool
+    recent_removed: bool = False
     category: str = "image"
     project_id: int | None = None
     batch_id: str | None
@@ -581,6 +583,8 @@ def patch_generation(
         generation.name = body.name.strip()
     if body.hidden is not None:
         generation.hidden = body.hidden
+    if body.recent_removed is not None:
+        generation.recent_removed = body.recent_removed
     if body.category is not None:
         if body.category not in ("image", "character", "video"):
             raise HTTPException(status_code=400, detail="Invalid category")

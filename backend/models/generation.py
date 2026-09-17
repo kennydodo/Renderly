@@ -29,6 +29,8 @@ class Generation(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_usd: Mapped[float] = mapped_column(default=0.0)
     hidden: Mapped[bool] = mapped_column(default=False)
+    # Removed from the channel's "Recent generations" strip (still in library)
+    recent_removed: Mapped[bool] = mapped_column(default=False)
     # Media organization (Flow-style tabs): image | character | video
     category: Mapped[str] = mapped_column(String(20), default="image")
     project_id: Mapped[int | None] = mapped_column(

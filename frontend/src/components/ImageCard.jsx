@@ -11,6 +11,7 @@ export default function ImageCard({
   onSaveToChannel,
   onRegenerate,
   onRetry,
+  onDelete,
   onHide,
   onUpscale,
   onSetCategory,
@@ -24,6 +25,7 @@ export default function ImageCard({
   const [regenDraft, setRegenDraft] = useState("");
   const [upscaling, setUpscaling] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     setDraftName(generation.name);
@@ -104,6 +106,16 @@ export default function ImageCard({
     }
   };
 
+  const handleDelete = async () => {
+    if (!onDelete || deleting) return;
+    setDeleting(true);
+    try {
+      await onDelete(generation.id);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const isFailed = generation.status === "error";
 
   const upscaleButtons = onUpscale ? (
@@ -140,18 +152,36 @@ export default function ImageCard({
           ) : (
             <div className="image-placeholder">
               {isFailed ? "Failed" : "Generating…"}
-              {isFailed && onRetry && (
-                <button
-                  type="button"
-                  className="overlay-btn"
-                  disabled={retrying}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleRetry();
-                  }}
-                >
-                  {retrying ? "Retrying…" : "↻ Retry"}
-                </button>
+              {isFailed && (onRetry || onDelete) && (
+                <div className="failed-actions">
+                  {onRetry && (
+                    <button
+                      type="button"
+                      className="overlay-btn"
+                      disabled={retrying}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRetry();
+                      }}
+                    >
+                      {retrying ? "Retrying…" : "↻ Retry"}
+                    </button>
+                  )}
+                  {onDelete && (
+                    <button
+                      type="button"
+                      className="overlay-btn danger"
+                      disabled={deleting}
+                      title="Delete this failed generation"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete();
+                      }}
+                    >
+                      {deleting ? "Deleting…" : "🗑 Delete"}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}

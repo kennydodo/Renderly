@@ -238,6 +238,25 @@ export default function ChannelWorkspace() {
     }
   };
 
+  const handleDeleteGeneration = async (id) => {
+    if (!window.confirm("Delete this failed generation?")) return;
+    try {
+      await api.deleteGeneration(id);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleRemoveFromRecent = async (id) => {
+    try {
+      await api.patchGeneration(id, { recent_removed: true });
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
   const handleDeleteTemplate = async (id) => {
     try {
       await api.deleteTemplate(id);
@@ -307,6 +326,11 @@ export default function ChannelWorkspace() {
       ? generations.filter((g) => String(g.project_id) === String(routeProjectId))
       : [];
   const unassignedCount = generations.filter((g) => g.project_id == null).length;
+  // Recent strip: latest 10 successful generations of this project, minus
+  // ones the user removed - older ones backfill so it stays full when possible.
+  const recentItems = projectGenerations
+    .filter((g) => g.status === "done" && g.image_url && !g.recent_removed)
+    .slice(0, 10);
   const projectCounts = {};
   generations.forEach((g) => {
     if (g.project_id != null) {
@@ -504,14 +528,13 @@ export default function ChannelWorkspace() {
                   />
 
                   <label className="field-label">Recent generations</label>
-                  {projectGenerations.length === 0 ? (
+                  {recentItems.length === 0 ? (
                     <p className="muted small">Nothing generated yet.</p>
                   ) : (
                     <div className="recent-strip">
-                      {projectGenerations.slice(0, 10).map((g) =>
-                        g.image_url ? (
+                      {recentItems.map((g) => (
+                        <span key={g.id} className="recent-item">
                           <img
-                            key={g.id}
                             src={g.image_url}
                             alt={g.name || g.prompt}
                             title={`${g.name || g.prompt} — click to use as reference`}
@@ -524,18 +547,16 @@ export default function ChannelWorkspace() {
                               })
                             }
                           />
-                        ) : (
                           <button
-                            key={g.id}
                             type="button"
-                            className="recent-failed"
-                            title="Failed — click to retry"
-                            onClick={() => handleRetry(g.id)}
+                            className="recent-remove"
+                            title="Remove from recent"
+                            onClick={() => handleRemoveFromRecent(g.id)}
                           >
                             ✕
                           </button>
-                        ),
-                      )}
+                        </span>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -572,6 +593,7 @@ export default function ChannelWorkspace() {
                           onSaveToChannel={handleSaveToChannel}
                           onRegenerate={handleRegenerate}
                           onRetry={handleRetry}
+                          onDelete={handleDeleteGeneration}
                           onHide={handleHide}
                           onUpscale={upscalerAvailable ? handleUpscale : null}
                           onSetCategory={handleSetCategory}

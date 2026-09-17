@@ -27,6 +27,7 @@ _MIGRATIONS = (
     "ALTER TABLE generations ADD COLUMN ref_strength VARCHAR(20) NOT NULL DEFAULT 'balanced'",
     "ALTER TABLE generations ADD COLUMN cost_usd FLOAT NOT NULL DEFAULT 0",
     "ALTER TABLE generations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE generations ADD COLUMN recent_removed INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE generations ADD COLUMN image_size VARCHAR(20) NOT NULL DEFAULT '1K'",
     "ALTER TABLE generations ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'image'",
     "ALTER TABLE generations ADD COLUMN project_id INTEGER",
