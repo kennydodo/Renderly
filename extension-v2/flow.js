@@ -76,7 +76,7 @@ function usage() {
   node flow.js --diag
 
 Options:
-  --file <path>      Prompts file: JSON array or one prompt per line
+  --file <path>      Prompts file: JSON array, {master,cards} object, or shotlist
   --prompt "<text>"  Single prompt run
   --master "<text>"  Style prefix prepended to every card prompt
   --channel <id>     Renderly channel id — results are imported via /api/channels/{id}/import
@@ -183,6 +183,22 @@ function loadCards(opts) {
             name: e.name,
             prompt: e.prompt || e.name || "",
             refs: normalizeRefs([...(obj2.refs || []), ...opts.refs]),
+          };
+        })
+        .filter(Boolean);
+    }
+    // Shotlist format: { schema_version, video, style, shots, images }
+    // — style becomes the master prompt, images[] is the generation list.
+    if (Array.isArray(obj.images)) {
+      opts.masterSource = String(obj.style || "").trim();
+      return obj.images
+        .map((img) => {
+          const e = extractFromObject(img);
+          if (!e) return null;
+          return {
+            name: e.name,
+            prompt: e.prompt || e.name || "",
+            refs: normalizeRefs([...(img.refs || []), ...opts.refs]),
           };
         })
         .filter(Boolean);
@@ -932,16 +948,6 @@ async function attachRefs(page, refPaths) {
   const labelHas = (labelList, name) =>
     labelList.some((l) => l.toLowerCase() === name.toLowerCase());
 
-  // Ingredients persist in the composer across cards of a run — if a chip
-  // is already present, these same refs are attached; adding again would
-  // duplicate (Flow caps ingredients at 3).
-  const chips = await page
-    .evaluate(() => window.__renderly.hasIngredientChip())
-    .catch(() => false);
-  if (chips) {
-    return { attached: true, how: "already attached (persisted from previous card)" };
-  }
-
   const labels = await page.evaluate(() => window.__renderly.galleryLabels()).catch(() => []);
   let missing = refPaths.filter((p) => !labelHas(labels, path.basename(p)));
   // The grid hydrates lazily — give the tiles a moment before deciding
@@ -1278,7 +1284,6 @@ async function runFlowSession(page, opts, cards) {
 
   const versions = Math.min(4, Math.max(1, opts.versions));
   const masterRefPaths = cards[0] ? cards[0].refs.filter((r) => opts.refs.includes(r)) : [];
-  let refsAttachedOnce = false;
   let ok = 0;
   let failed = 0;
   let costUsd = 0;
@@ -1311,22 +1316,20 @@ async function runFlowSession(page, opts, cards) {
       console.log("  Run `node flow.js --diag` and adjust the fill logic for your Flow build.");
     }
 
-    // 2. References — global ones once per batch, card-specific per card.
+    // 2. References — attached on EVERY card (and every version): Flow's
+    //    composer wipe (select-all + insert on each fill) also clears the
+    //    ingredient chips, so they never survive from the previous card.
     const cardRefs = card.refs.filter((r) => !opts.refs.includes(r));
-    const pending = [];
-    if (masterRefPaths.length && !refsAttachedOnce) pending.push(...masterRefPaths);
-    if (cardRefs.length && v === 0) pending.push(...cardRefs);
+    const pending = [...masterRefPaths, ...cardRefs];
     if (pending.length) {
       console.log(`  attaching ${pending.length} reference image(s) via Flow's gallery…`);
       const res = await attachRefs(page, pending);
       if (res.attached) {
-        refsAttachedOnce = true;
         console.log(`  attached (${res.how})`);
       } else {
         console.log(`  ⚠ could not attach automatically: ${res.reason}`);
         console.log("    Attach them manually in Flow now, then continue.");
         await pause("  Press Enter after attaching…");
-        refsAttachedOnce = true;
       }
 
       // The ingredient picker navigates away and can clear the composer —
