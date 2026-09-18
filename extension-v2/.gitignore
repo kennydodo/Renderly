@@ -1,6 +1,7 @@
 node_modules/
 profile/
 output/
+driver-config.json
 diag-report.json
 attach-fail-report.json
 click-diag-report.json

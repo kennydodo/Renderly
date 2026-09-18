@@ -35,6 +35,9 @@ start "Renderly Backend" cmd /k "cd /d %~dp0backend && .venv\Scripts\python.exe 
 echo [start] Frontend - http://localhost:5173
 start "Renderly Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
 
+echo [start] Flow driver - http://127.0.0.1:8030
+start "Renderly Flow Driver" cmd /k "cd /d %~dp0extension-v2 && (if not exist node_modules\playwright call npm install --no-fund --no-audit) && node server.js"
+
 timeout /t 3 /nobreak >nul
 echo.
 echo Both windows launched. Close them or run stop.bat to quit Renderly.

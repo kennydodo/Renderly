@@ -2,6 +2,7 @@ import { NavLink, Route, Routes } from "react-router-dom";
 
 import ChannelList from "./pages/ChannelList.jsx";
 import ChannelWorkspace from "./pages/ChannelWorkspace.jsx";
+import FlowDriver from "./pages/FlowDriver.jsx";
 import History from "./pages/History.jsx";
 import Settings from "./pages/Settings.jsx";
 
@@ -16,6 +17,7 @@ export default function App() {
           <NavLink to="/" end>
             Channels
           </NavLink>
+          <NavLink to="/flow">Flow Driver</NavLink>
           <NavLink to="/history">History</NavLink>
           <NavLink to="/settings">Settings</NavLink>
         </nav>
@@ -27,6 +29,7 @@ export default function App() {
           <Route path="/channels/:channelId" element={<ChannelWorkspace />} />
           <Route path="/channels/:channelId/projects/:projectId" element={<ChannelWorkspace />} />
           <Route path="/history" element={<History />} />
+          <Route path="/flow" element={<FlowDriver />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

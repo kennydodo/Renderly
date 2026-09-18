@@ -789,6 +789,9 @@ async function installHelpers(page) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function pause(message) {
+  // Non-interactive contexts (the driver service spawns us without a TTY)
+  // must never block on a prompt.
+  if (!process.stdin || !process.stdin.isTTY) return Promise.resolve();
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) =>
     rl.question(message || "Press Enter to continue…", () => {
