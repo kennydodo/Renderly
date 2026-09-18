@@ -175,6 +175,7 @@ def _get_channel_or_404(db: Session, channel_id: int) -> Channel:
 
 def _generation_file(generation: Generation):
     rel = (generation.image_url or "").removeprefix("/storage/")
+    rel = rel.split("?", 1)[0]  # drop cache-buster query markers
     return STORAGE_DIR / rel
 
 
@@ -669,37 +670,27 @@ def generation_thumb(generation_id: int, db: Session = Depends(get_db)):
     return FileResponse(thumb, media_type="image/png")
 
 
-def _upscaled_generation(
-    db: Session, source: Generation, scale: int
-) -> Generation:
+def _upscale_in_place(db: Session, source: Generation, scale: int) -> Generation:
+    """Upscale the generation's image and update the SAME record — the
+    gallery keeps one entry, one file, and the ORIGINAL name (no 2x/4x
+    suffixes). A query marker on image_url busts the browser cache."""
     src_path = _generation_file(source)
-    base_name = re.sub(r"\.(png|jpe?g)$", "", source.name or _auto_name(source.prompt), flags=re.IGNORECASE)
-    out_filename = _unique_filename(
-        STORAGE_DIR / str(source.channel_id),
-        _sanitize_filename(f"{base_name}_{scale}x") + ".png",
-    )
-    out_path = STORAGE_DIR / str(source.channel_id) / out_filename
-    width, height = upscaler.upscale(src_path, out_path, scale)
-    generation = Generation(
-        channel_id=source.channel_id,
-        project_id=source.project_id,
-        name=f"{base_name} ({scale}x)",
-        prompt=source.prompt,
-        model=upscaler.engine_label(scale),
-        status="done",
-        image_url=f"/storage/{source.channel_id}/{out_filename}",
-        aspect_ratio=source.aspect_ratio,
-        ref_strength="balanced",
-        image_size=upscaler.classify_size(width, height),
-        ref_asset_ids=source.ref_asset_ids or "[]",
-        ref_generation_ids=source.ref_generation_ids or "[]",
-        cost_usd=0.0,
-        hidden=False,
-    )
-    db.add(generation)
+    tmp_path = src_path.with_name(f"tmp_upscale_{uuid.uuid4().hex}.png")
+    try:
+        width, height = upscaler.upscale(src_path, tmp_path, scale)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    try:
+        src_path.unlink()
+    except OSError:
+        pass
+    tmp_path.replace(src_path)
+    source.image_url = f"/storage/{source.channel_id}/{src_path.name}?v={uuid.uuid4().hex[:8]}"
+    source.image_size = upscaler.classify_size(width, height)
     db.commit()
-    db.refresh(generation)
-    return generation
+    db.refresh(source)
+    return source
 
 
 @router.post("/generations/{generation_id}/upscale", response_model=GenerationOut)
@@ -716,7 +707,7 @@ def upscale_generation(
     if source.status != "done" or not source.image_url:
         raise HTTPException(status_code=400, detail="Generation has no image to upscale")
     try:
-        return _upscaled_generation(db, source, body.scale)
+        return _upscale_in_place(db, source, body.scale)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:

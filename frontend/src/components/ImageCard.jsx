@@ -7,6 +7,9 @@ export default function ImageCard({
   channels,
   selected,
   onSelect,
+  multiSelect,
+  multiChecked,
+  onMultiToggle,
   onRename,
   onSaveToChannel,
   onRegenerate,
@@ -144,9 +147,28 @@ export default function ImageCard({
       <figure className={`image-card ${statusClass}${selected ? " selected" : ""}`}>
         <div
           className="image-frame"
-          onClick={() => isDone && setLightbox(true)}
-          title={isDone ? "Click to enlarge" : undefined}
+          onClick={() => isDone && !multiSelect && setLightbox(true)}
+          title={isDone && !multiSelect ? "Click to enlarge" : undefined}
         >
+          {multiSelect && isDone && (
+            <input
+              type="checkbox"
+              checked={!!multiChecked}
+              title={multiChecked ? "Unselect" : "Select for deletion"}
+              onClick={(e) => e.stopPropagation()}
+              onChange={() => onMultiToggle(generation.id)}
+              style={{
+                position: "absolute",
+                top: "10px",
+                left: "10px",
+                width: "22px",
+                height: "22px",
+                zIndex: 4,
+                cursor: "pointer",
+                accentColor: "#e5484d",
+              }}
+            />
+          )}
           {isDone ? (
             <img src={generation.image_url} alt={generation.prompt} loading="lazy" />
           ) : (

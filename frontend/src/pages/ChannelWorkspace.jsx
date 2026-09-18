@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client.js";
 import BatchGenerateForm from "../components/BatchGenerateForm.jsx";
@@ -23,7 +23,11 @@ export default function ChannelWorkspace() {
   const [galleryItems, setGalleryItems] = useState([]);
   const [gallerySearch, setGallerySearch] = useState("");
   const [galleryLoading, setGalleryLoading] = useState(false);
-  const [view, setView] = useState("create");
+  // Library view lives in the URL (?view=all) so refreshes keep the view.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = searchParams.get("view") || "create";
+  const [selectMode, setSelectMode] = useState(false);
+  const [deleteSelection, setDeleteSelection] = useState(() => new Set());
 
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -101,11 +105,15 @@ export default function ChannelWorkspace() {
     return () => clearTimeout(searchTimer.current);
   }, [refsSource, gallerySearch]);
 
-  // Opening a project lands on the composer; the library is one click
-  // away in the sidebar.
+  // Opening a DIFFERENT project lands on the composer; a plain refresh
+  // keeps the library view via the ?view= query param.
+  const prevProjectRef = useRef(null);
   useEffect(() => {
-    if (routeProjectId) setView("create");
-  }, [routeProjectId]);
+    if (prevProjectRef.current !== null && prevProjectRef.current !== routeProjectId) {
+      setSearchParams({}, { replace: true });
+    }
+    prevProjectRef.current = routeProjectId;
+  }, [routeProjectId, setSearchParams]);
 
   if (!channel) {
     return <p className="muted">{error || "Loading…"}</p>;
@@ -118,6 +126,20 @@ export default function ChannelWorkspace() {
         : [...refs, ref],
     );
   };
+
+  const setView = (v) => {
+    setSearchParams(v === "create" ? {} : { view: v }, { replace: true });
+    setSelectMode(false);
+    setDeleteSelection(new Set());
+  };
+
+  const toggleDeleteSelection = (id) =>
+    setDeleteSelection((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const handleUpload = async (file) => {
     setUploading(true);
@@ -242,6 +264,27 @@ export default function ChannelWorkspace() {
     if (!window.confirm("Delete this failed generation?")) return;
     try {
       await api.deleteGeneration(id);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    const ids = [...deleteSelection];
+    if (!ids.length) return;
+    if (
+      !window.confirm(
+        `Permanently delete ${ids.length} image(s) from the database and disk? This cannot be undone.`,
+      )
+    )
+      return;
+    try {
+      const results = await Promise.allSettled(ids.map((id) => api.deleteGeneration(id)));
+      const failures = results.filter((r) => r.status === "rejected").length;
+      if (failures) setError(`${failures} of ${ids.length} deletions failed.`);
+      setDeleteSelection(new Set());
+      setSelectMode(false);
       await load();
     } catch (err) {
       setError(err.message);
@@ -571,35 +614,74 @@ export default function ChannelWorkspace() {
                     return <p className="muted">Nothing here yet.</p>;
                   }
                   return (
-                    <div className="grid images">
-                      {visible.map((generation) => (
-                        <ImageCard
-                          key={generation.id}
-                          generation={generation}
-                          channels={channels}
-                          selected={selectedGenerationIds.includes(generation.id)}
-                          onSelect={(id) => {
-                            const gen = projectGenerations.find((g) => g.id === id);
-                            if (gen) {
-                              toggleRef({
-                                type: "generation",
-                                id: gen.id,
-                                url: gen.image_url,
-                                label: gen.name || gen.prompt,
-                              });
-                            }
+                    <>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "10px",
+                          alignItems: "center",
+                          marginBottom: "12px",
+                        }}
+                      >
+                        <button
+                          type="button"
+                          className={selectMode ? "on" : ""}
+                          onClick={() => {
+                            setSelectMode(!selectMode);
+                            setDeleteSelection(new Set());
                           }}
-                          onRename={handleRename}
-                          onSaveToChannel={handleSaveToChannel}
-                          onRegenerate={handleRegenerate}
-                          onRetry={handleRetry}
-                          onDelete={handleDeleteGeneration}
-                          onHide={handleHide}
-                          onUpscale={upscalerAvailable ? handleUpscale : null}
-                          onSetCategory={handleSetCategory}
-                        />
-                      ))}
-                    </div>
+                        >
+                          {selectMode ? "Cancel selection" : "Select"}
+                        </button>
+                        {selectMode && (
+                          <>
+                            <span className="muted small">
+                              {deleteSelection.size} selected
+                            </span>
+                            <button
+                              type="button"
+                              className="danger"
+                              onClick={handleDeleteSelected}
+                              disabled={deleteSelection.size === 0}
+                            >
+                              🗑 Delete selected
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      <div className="grid images">
+                        {visible.map((generation) => (
+                          <ImageCard
+                            key={generation.id}
+                            generation={generation}
+                            channels={channels}
+                            selected={selectedGenerationIds.includes(generation.id)}
+                            multiSelect={selectMode}
+                            multiChecked={deleteSelection.has(generation.id)}
+                            onMultiToggle={toggleDeleteSelection}
+                            onSelect={(id) => {
+                              const gen = projectGenerations.find((g) => g.id === id);
+                              if (gen) {
+                                toggleRef({
+                                  type: "generation",
+                                  id: gen.id,
+                                  url: gen.image_url,
+                                  label: gen.name || gen.prompt,
+                                });
+                              }
+                            }}
+                            onRename={handleRename}
+                            onSaveToChannel={handleSaveToChannel}
+                            onRegenerate={handleRegenerate}
+                            onRetry={handleRetry}
+                            onDelete={handleDeleteGeneration}
+                            onHide={handleHide}
+                            onUpscale={upscalerAvailable ? handleUpscale : null}
+                            onSetCategory={handleSetCategory}
+                          />
+                        ))}
+                      </div>
+                    </>
                   );
                 })()}
               </>
