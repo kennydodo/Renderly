@@ -1,0 +1,8 @@
+node_modules/
+profile/
+output/
+diag-report.json
+attach-fail-report.json
+click-diag-report.json
+drop-test-report.json
+diag-screenshot.png

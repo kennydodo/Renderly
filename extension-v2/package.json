@@ -1,0 +1,14 @@
+{
+  "name": "renderly-extension-v2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright driver for Google Flow: batch image generation with programmatic reference-image attachment (the part the MV3 extension cannot do).",
+  "main": "flow.js",
+  "scripts": {
+    "start": "node flow.js",
+    "diag": "node flow.js --diag"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
