@@ -1140,7 +1140,16 @@ async function main() {
     headless: false,
     viewport: null,
     chromiumSandbox: true, // avoids Chrome's "--no-sandbox unsupported" warning bar
-    args: ["--start-maximized", "--disable-blink-features=AutomationControlled"],
+    args: [
+      "--start-maximized",
+      "--disable-blink-features=AutomationControlled",
+      // Keep generating while the window is minimized or covered: without
+      // these, Windows occlusion marks the page hidden and Flow pauses.
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+    ],
   });
   const page = context.pages()[0] || (await context.newPage());
   try {
