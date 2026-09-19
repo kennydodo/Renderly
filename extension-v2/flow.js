@@ -1118,12 +1118,10 @@ async function main() {
         if (opts.upscale > 0) {
           try {
             const up = await upscaleGeneration(opts.backend, record.id, opts.upscale);
-            const upscaledPath = path.join(
-              path.dirname(filePath),
-              `${path.basename(filePath, ".png")}-upscaled.png`
-            );
-            await downloadUrl(new URL(up.image_url, opts.backend).href, upscaledPath);
-            console.log(`  upscaled → ${up.image_size}`);
+            // Replace in place: the upscaled image keeps the exact original
+            // filename (no "-upscaled" duplicate next to it).
+            await downloadUrl(new URL(up.image_url, opts.backend).href, filePath);
+            console.log(`  upscaled in place → ${up.image_size}`);
           } catch (err) {
             console.log(`  ⚠ upscale skipped: ${err.message}`);
           }
@@ -1404,13 +1402,10 @@ async function runFlowSession(page, opts, cards) {
         try {
           const up = await upscaleGeneration(opts.backend, record.id, opts.upscale);
           costUsd += up.cost_usd || 0;
-          // Keep the original render; write the upscaled copy alongside it.
-          const upscaledPath = path.join(
-            path.dirname(filePath),
-            `${path.basename(filePath, ".png")}-upscaled.png`
-          );
-          await downloadUrl(new URL(up.image_url, opts.backend).href, upscaledPath);
-          console.log(`  upscaled → ${up.image_size} (${path.basename(upscaledPath)})`);
+          // Replace in place: the upscaled image keeps the exact shotlist
+          // filename (S##_##_TYPE_MOTION.png) - no "-upscaled" duplicate.
+          await downloadUrl(new URL(up.image_url, opts.backend).href, filePath);
+          console.log(`  upscaled in place → ${up.image_size} (${path.basename(filePath)})`);
         } catch (err) {
           console.log(`  ⚠ upscale skipped: ${err.message}`);
         }
