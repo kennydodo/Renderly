@@ -154,15 +154,40 @@ function composePrompt(opts, card) {
 }
 
 function loadCards(opts) {
-  const normalizeRefs = (arr) =>
-    (arr || [])
-      .map((p) => path.resolve(String(p).trim()))
-      .filter(Boolean)
-      .filter((p) => {
-        if (fs.existsSync(p)) return true;
-        console.warn(`⚠ reference not found, skipping: ${p}`);
-        return false;
-      });
+  const EXTS = ["", ".png", ".jpg", ".jpeg", ".webp"];
+  const EXT_RE = /\.(png|jpe?g|webp)$/i;
+  const baseDirs = [];
+  if (opts.file) {
+    const shotDir = path.dirname(path.resolve(opts.file));
+    baseDirs.push(shotDir, path.join(shotDir, "refs"));
+  }
+  // Ref entries may be absolute paths, or bare names ("Maya", "conference")
+  // sitting next to the shotlist file (or in its refs\ subfolder). Absolute
+  // paths and cwd-relative paths keep working as before.
+  const normalizeRefs = (arr) => {
+    const out = [];
+    for (const raw0 of arr || []) {
+      const raw = String(raw0).trim();
+      if (!raw) continue;
+      const candidates = [path.resolve(raw)];
+      if (!path.isAbsolute(raw)) {
+        for (const b of baseDirs) {
+          for (const ext of EXTS) candidates.push(path.join(b, raw + ext));
+        }
+      } else if (!EXT_RE.test(raw)) {
+        for (const ext of EXTS.slice(1)) candidates.push(raw + ext);
+      }
+      const found = candidates.find(
+        (c) => fs.existsSync(c) && fs.statSync(c).isFile()
+      );
+      if (found) {
+        out.push(path.resolve(found));
+        continue;
+      }
+      console.warn(`⚠ reference not found, skipping: ${path.resolve(raw)}`);
+    }
+    return [...new Set(out)];
+  };
 
   if (opts.prompt) {
     const { name, prompt } = splitPromptName(opts.prompt);
