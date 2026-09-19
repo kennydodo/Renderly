@@ -1029,18 +1029,26 @@ async function attachRefs(page, refPaths) {
     await addBtn.click({ timeout: 10000 }).catch(() => {});
     await sleep(1200);
   }
-  await addBtn.click({ timeout: 20000 });
+  const search = page.getByRole("textbox", { name: "Search assets" }).first();
+  const dialogOpen = async () =>
+    (await page.locator('div[role="dialog"]').count()) > 0;
+  const openDialog = async () => {
+    if (await dialogOpen()) return;
+    await addBtn.click({ timeout: 10000 });
+    await search.waitFor({ timeout: 10000 }).catch(() => {});
+    await sleep(1000);
+  };
+  await openDialog();
   const addPromptBtn = page.getByRole("button", { name: "Add to prompt" }).first();
   const hasConfirm = await addPromptBtn
-    .waitFor({ timeout: 4000 })
+    .waitFor({ timeout: 2000 })
     .then(() => true)
     .catch(() => false);
-  const search = page.getByRole("textbox", { name: "Search assets" }).first();
-  await search.waitFor({ timeout: 10000 }).catch(() => {});
 
   let selected = 0;
   for (const name of names) {
     try {
+      await openDialog(); // new Flow closes the dialog after each selection
       // Filter the virtual-scrolled asset list to this ref before clicking -
       // otherwise the tile under the locator can be recycled to another
       // asset between resolve and click (wrong ref attached).
@@ -1066,20 +1074,24 @@ async function attachRefs(page, refPaths) {
   // Some Flow builds attach immediately on selection and close the panel;
   // others wait for "Add to prompt". Handle both.
   if (hasConfirm) {
+    await openDialog().catch(() => {});
     const stillOpen = await addPromptBtn.isVisible().catch(() => false);
     if (stillOpen) {
       await addPromptBtn.click({ timeout: 10000 });
     }
   }
 
-  // Close the dialog promptly - a leftover overlay blocks every later card.
-  await sleep(500);
-  await page.keyboard.press("Escape").catch(() => {});
-  await sleep(600);
-  const closeBtn = page.getByRole("button", { name: "Close" }).first();
-  if (await closeBtn.isVisible().catch(() => false)) {
-    await closeBtn.click({ timeout: 4000 }).catch(() => {});
+  // Close the dialog promptly if it is still open - a leftover overlay
+  // blocks every later card.
+  if (await dialogOpen()) {
+    await sleep(400);
+    await page.keyboard.press("Escape").catch(() => {});
     await sleep(600);
+    const closeBtn = page.getByRole("button", { name: "Close" }).first();
+    if (await closeBtn.isVisible().catch(() => false)) {
+      await closeBtn.click({ timeout: 4000 }).catch(() => {});
+      await sleep(600);
+    }
   }
 
   let chip = await page.evaluate(() => window.__renderly.hasIngredientChip()).catch(() => false);
