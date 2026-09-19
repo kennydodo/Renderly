@@ -93,6 +93,9 @@ export const api = {
   upscaleAsset: (id, scale = 2) =>
     request(`/api/assets/${id}/upscale`, { method: "POST", body: JSON.stringify({ scale }) }),
   upscaleStatus: () => request("/api/upscale/status"),
+  getSettings: () => request("/api/settings"),
+  updateSettings: (patch) =>
+    request("/api/settings", { method: "PUT", body: JSON.stringify(patch) }),
   listProjects: (channelId) =>
     request(`/api/projects?channel_id=${channelId}`),
   createProject: (channelId, name) =>

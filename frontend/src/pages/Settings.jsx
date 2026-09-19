@@ -9,16 +9,21 @@ export default function Settings() {
   const [deletingAll, setDeletingAll] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [genSettings, setGenSettings] = useState(null);
+  const [savingGen, setSavingGen] = useState(false);
+  const [genSaved, setGenSaved] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [channelList, hiddenList] = await Promise.all([
+      const [channelList, hiddenList, gen] = await Promise.all([
         api.listChannels(),
         api.listGenerations({ hidden: "only", limit: 100 }),
+        api.getSettings(),
       ]);
       setChannels(channelList);
       setHiddenItems(hiddenList);
+      setGenSettings(gen);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -30,6 +35,25 @@ export default function Settings() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const saveGenSettings = async () => {
+    setSavingGen(true);
+    setGenSaved(false);
+    try {
+      const saved = await api.updateSettings({
+        upscale_level: genSettings.upscale_level,
+        auto_download: genSettings.auto_download,
+        download_dir: genSettings.download_dir,
+      });
+      setGenSettings(saved);
+      setGenSaved(true);
+      setTimeout(() => setGenSaved(false), 2000);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingGen(false);
+    }
+  };
 
   const doRemove = async (channel) => {
     try {
@@ -97,6 +121,60 @@ export default function Settings() {
         Manage channels here. Removing a channel permanently deletes its assets and all
         generated images.
       </p>
+
+      {genSettings && (
+        <div className="card" style={{ maxWidth: "720px", marginBottom: "18px" }}>
+          <h2>Generation defaults</h2>
+          <div className="form-row" style={{ alignItems: "center" }}>
+            <label style={{ minWidth: "140px" }}>Upscale level</label>
+            <select
+              value={genSettings.upscale_level}
+              onChange={(e) =>
+                setGenSettings({ ...genSettings, upscale_level: Number(e.target.value) })
+              }
+            >
+              <option value={0}>Off — keep native size</option>
+              <option value={2}>2× upscaled automatically</option>
+              <option value={4}>4× upscaled automatically</option>
+            </select>
+          </div>
+          <div className="form-row" style={{ alignItems: "center" }}>
+            <label style={{ minWidth: "140px" }}>Auto download</label>
+            <label style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={!!genSettings.auto_download}
+                onChange={(e) =>
+                  setGenSettings({ ...genSettings, auto_download: e.target.checked })
+                }
+              />
+              <span className="muted small">
+                Save every finished image to the download folder automatically
+              </span>
+            </label>
+          </div>
+          <div className="form-row" style={{ alignItems: "center" }}>
+            <label style={{ minWidth: "140px" }}>Download folder</label>
+            <input
+              type="text"
+              style={{ flex: 1 }}
+              value={genSettings.download_dir || ""}
+              placeholder="e.g. E:\YOUTUBE — images land in <folder>\<channel name>"
+              onChange={(e) =>
+                setGenSettings({ ...genSettings, download_dir: e.target.value })
+              }
+            />
+          </div>
+          <div className="form-row">
+            <button onClick={saveGenSettings} disabled={savingGen}>
+              {savingGen ? "Saving…" : genSaved ? "Saved ✓" : "Save generation defaults"}
+            </button>
+            <span className="muted small">
+              Applies to new generations: auto-upscale runs first, then auto-download.
+            </span>
+          </div>
+        </div>
+      )}
 
       {error && <p className="error">{error}</p>}
 

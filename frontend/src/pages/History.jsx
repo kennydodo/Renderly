@@ -12,7 +12,6 @@ export default function History() {
   const [generations, setGenerations] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [upscalerAvailable, setUpscalerAvailable] = useState(false);
 
   const searchTimer = useRef(null);
 
@@ -75,22 +74,6 @@ export default function History() {
     }
   };
 
-  const handleUpscale = async (id, scale) => {
-    try {
-      await api.upscaleGeneration(id, scale);
-      await load();
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  useEffect(() => {
-    api
-      .upscaleStatus()
-      .then((s) => setUpscalerAvailable(Boolean(s.available)))
-      .catch(() => setUpscalerAvailable(false));
-  }, []);
-
   const handleSaveToChannel = async (id, targetChannelId) => {
     try {
       await api.saveGenerationAsAsset(id, targetChannelId);
@@ -143,7 +126,6 @@ export default function History() {
               onSaveToChannel={handleSaveToChannel}
               onRegenerate={handleRegenerate}
               onHide={handleHide}
-              onUpscale={upscalerAvailable ? handleUpscale : null}
             />
             ))}
           </div>

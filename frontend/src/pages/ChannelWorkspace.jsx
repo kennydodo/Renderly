@@ -36,14 +36,13 @@ export default function ChannelWorkspace() {
   const [refStrength, setRefStrength] = useState("balanced");
   const [templates, setTemplates] = useState([]);
   const [spend, setSpend] = useState(null);
-  const [upscalerAvailable, setUpscalerAvailable] = useState(false);
   const [error, setError] = useState("");
 
   const searchTimer = useRef(null);
 
   const load = useCallback(async () => {
     try {
-      const [channelList, projectList, generationData, templateData, spendData, upscaleData] =
+      const [channelList, projectList, generationData, templateData, spendData] =
         await Promise.all([
           api.listChannels(),
           api.listProjects(channelId).catch(() => []),
@@ -54,7 +53,6 @@ export default function ChannelWorkspace() {
           }),
           api.listTemplates(channelId).catch(() => []),
           api.spendSummary({ channelId }).catch(() => null),
-          api.upscaleStatus().catch(() => ({ available: false })),
         ]);
       setChannels(channelList);
       setChannel(channelList.find((c) => String(c.id) === channelId) || null);
@@ -62,7 +60,6 @@ export default function ChannelWorkspace() {
       setGenerations(generationData);
       setTemplates(templateData);
       setSpend(spendData);
-      setUpscalerAvailable(Boolean(upscaleData.available));
       setError("");
     } catch (err) {
       setError(err.message);
@@ -321,15 +318,6 @@ export default function ChannelWorkspace() {
   const handleSetCategory = async (id, category) => {
     try {
       await api.patchGeneration(id, { category });
-      await load();
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  const handleUpscale = async (id, scale) => {
-    try {
-      await api.upscaleGeneration(id, scale);
       await load();
     } catch (err) {
       setError(err.message);
@@ -676,7 +664,6 @@ export default function ChannelWorkspace() {
                             onRetry={handleRetry}
                             onDelete={handleDeleteGeneration}
                             onHide={handleHide}
-                            onUpscale={upscalerAvailable ? handleUpscale : null}
                             onSetCategory={handleSetCategory}
                           />
                         ))}

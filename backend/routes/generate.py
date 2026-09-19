@@ -312,6 +312,45 @@ def _complete_generation(db: Session, generation: Generation, image_bytes: bytes
     db.commit()
     db.refresh(generation)
 
+    # Auto-upscale + auto-download per the user's settings. Runs in a daemon
+    # thread so the gallery shows "done" immediately; the upscaled file is
+    # picked up via the cache-busted image_url on the next poll.
+    threading.Thread(target=_auto_post_process, args=(generation.id,), daemon=True).start()
+
+
+def _auto_post_process(generation_id: int) -> None:
+    import shutil
+
+    from db import SessionLocal
+    from routes.settings import auto_process_settings
+
+    db = SessionLocal()
+    try:
+        generation = db.get(Generation, generation_id)
+        if generation is None or generation.status != "done" or not generation.image_url:
+            return
+        level, auto_download, download_dir = auto_process_settings(db)
+        if level > 0 and upscaler.is_available():
+            try:
+                _upscale_in_place(db, generation, level)
+            except Exception as exc:
+                print(f"[auto-upscale] generation {generation_id}: {exc}")
+        if not auto_download or not download_dir:
+            return
+        channel = db.get(Channel, generation.channel_id)
+        src = _generation_file(generation)
+        if channel is None or not src.exists():
+            return
+        target_dir = Path(download_dir) / _sanitize_filename(channel.name)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(src, target_dir / src.name)
+            print(f"[auto-download] {src.name} -> {target_dir / src.name}")
+        except OSError as exc:
+            print(f"[auto-download] generation {generation_id}: {exc}")
+    finally:
+        db.close()
+
 
 def _fail_generation(db: Session, generation: Generation, exc: Exception) -> None:
     generation.status = "error"

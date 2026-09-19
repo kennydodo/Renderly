@@ -16,7 +16,6 @@ export default function ImageCard({
   onRetry,
   onDelete,
   onHide,
-  onUpscale,
   onSetCategory,
 }) {
   const [lightbox, setLightbox] = useState(false);
@@ -26,7 +25,6 @@ export default function ImageCard({
   const [regenBusy, setRegenBusy] = useState(false);
   const [regenPrompt, setRegenPrompt] = useState(null);
   const [regenDraft, setRegenDraft] = useState("");
-  const [upscaling, setUpscaling] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -89,16 +87,6 @@ export default function ImageCard({
     </button>
   );
 
-  const handleUpscale = async (scale) => {
-    if (!onUpscale || upscaling) return;
-    setUpscaling(true);
-    try {
-      await onUpscale(generation.id, scale);
-    } finally {
-      setUpscaling(false);
-    }
-  };
-
   const handleRetry = async () => {
     if (!onRetry || retrying) return;
     setRetrying(true);
@@ -120,27 +108,6 @@ export default function ImageCard({
   };
 
   const isFailed = generation.status === "error";
-
-  const upscaleButtons = onUpscale ? (
-    <div className="overlay-actions upscale-row">
-      <button
-        className="overlay-btn"
-        onClick={() => handleUpscale(2)}
-        disabled={upscaling}
-        title="Local Real-ESRGAN 2x upscale (free)"
-      >
-        {upscaling ? "Upscaling…" : "⤢ Upscale 2×"}
-      </button>
-      <button
-        className="overlay-btn"
-        onClick={() => handleUpscale(4)}
-        disabled={upscaling}
-        title="Local Real-ESRGAN 4x upscale (free, slower)"
-      >
-        ⤢ 4×
-      </button>
-    </div>
-  ) : null;
 
   return (
     <>
@@ -232,7 +199,6 @@ export default function ImageCard({
             <div className="image-overlay" onClick={(e) => e.stopPropagation()}>
               <div className="overlay-actions">
                 {regenerateButton}
-                {upscaleButtons}
                 {onHide && (
                   <button
                     className="overlay-btn"
@@ -263,13 +229,6 @@ export default function ImageCard({
                     {generation.category === "character" ? "👤 Unset" : "👤 Character"}
                   </button>
                 )}
-                <a
-                  href={generation.image_url}
-                  download={downloadName}
-                  className="overlay-btn"
-                >
-                  Download
-                </a>
               </div>
               {saveOpen && (
                 <select

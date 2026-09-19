@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import STORAGE_DIR
 from db import Base, ensure_schema, engine
-from routes import assets, channels, generate, projects, templates
+from routes import assets, channels, generate, projects, settings, templates
 
 import models  # noqa: F401  (registers models on Base metadata)
 
@@ -39,6 +39,7 @@ app.include_router(channels.router)
 app.include_router(projects.router)
 app.include_router(assets.router)
 app.include_router(generate.router)
+app.include_router(settings.router)
 app.include_router(templates.router)
 
 
