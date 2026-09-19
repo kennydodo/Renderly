@@ -4,13 +4,13 @@ const STRENGTHS = [
   ["loose", "Loose refs"],
   ["strict", "Strict refs"],
 ];
-const SIZES = [
-  ["1K", "720p-class"],
-  ["2K", "1080p-class"],
-  ["4K", "4K"],
+const UPSCALE = [
+  [0, "Off — native 1K"],
+  [2, "2× upscaled"],
+  [4, "4× upscaled"],
 ];
 
-export default function GenerationOptions({ aspect, strength, size, onChange, compact = false }) {
+export default function GenerationOptions({ aspect, strength, upscale, onChange, compact = false }) {
   return (
     <div className={`form-row options-row${compact ? " compact" : ""}`}>
       <label className="option">
@@ -34,11 +34,11 @@ export default function GenerationOptions({ aspect, strength, size, onChange, co
         </select>
       </label>
       <label className="option">
-        <span>Res</span>
-        <select value={size} onChange={(e) => onChange({ size: e.target.value })}>
-          {SIZES.map(([value, label]) => (
+        <span>Upscale</span>
+        <select value={upscale} onChange={(e) => onChange({ upscale: Number(e.target.value) })}>
+          {UPSCALE.map(([value, label]) => (
             <option key={value} value={value}>
-              {value} · {label}
+              {label}
             </option>
           ))}
         </select>

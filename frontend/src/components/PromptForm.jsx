@@ -13,7 +13,7 @@ export default function PromptForm({
   const [prompt, setPrompt] = useState("");
   const [aspect, setAspect] = useState("16:9");
   const [strength, setStrength] = useState("balanced");
-  const [size, setSize] = useState("1K");
+  const [upscale, setUpscale] = useState(4);
 
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -22,7 +22,7 @@ export default function PromptForm({
       prompt: prompt.trim(),
       aspect_ratio: aspect,
       ref_strength: strength,
-      image_size: size,
+      upscale_level: upscale,
     });
     setPrompt("");
   };
@@ -81,11 +81,11 @@ export default function PromptForm({
       <GenerationOptions
         aspect={aspect}
         strength={strength}
-        size={size}
+        upscale={upscale}
         onChange={(patch) => {
           if (patch.aspect !== undefined) setAspect(patch.aspect);
           if (patch.strength !== undefined) setStrength(patch.strength);
-          if (patch.size !== undefined) setSize(patch.size);
+          if (patch.upscale !== undefined) setUpscale(patch.upscale);
         }}
       />
 

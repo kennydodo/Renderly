@@ -17,7 +17,6 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from config import (
-    DEFAULT_IMAGE_SIZE,
     GEMINI_IMAGE_MODEL,
     IMAGE_PRICE_USD,
     STORAGE_DIR,
@@ -90,7 +89,8 @@ class GenerateRequest(BaseModel):
     project_id: int | None = None
     aspect_ratio: AspectRatio = "16:9"
     ref_strength: RefStrength = "balanced"
-    image_size: ImageSize = DEFAULT_IMAGE_SIZE
+    image_size: ImageSize = "1K"  # always 1K from the API; upscaling is local
+    upscale_level: int | None = None  # 0 = off; None = use the saved setting
 
 
 class BatchItem(BaseModel):
@@ -107,7 +107,8 @@ class BatchGenerateRequest(BaseModel):
     project_id: int | None = None
     aspect_ratio: AspectRatio = "16:9"
     ref_strength: RefStrength = "balanced"
-    image_size: ImageSize = DEFAULT_IMAGE_SIZE
+    image_size: ImageSize = "1K"  # always 1K from the API; upscaling is local
+    upscale_level: int | None = None  # 0 = off; None = use the saved setting
     parallel: bool = False
 
 
@@ -123,6 +124,7 @@ class RegenerateRequest(BaseModel):
     aspect_ratio: AspectRatio | None = None
     ref_strength: RefStrength | None = None
     image_size: ImageSize | None = None
+    upscale_level: int | None = None  # 0 = off; None = use the saved setting
 
 
 class SaveAsAssetRequest(BaseModel):
@@ -154,16 +156,6 @@ class GenerationOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
-
-
-def _bump_image_size(image_size: str, scale: int) -> str:
-    order = ["1K", "2K", "4K"]
-    try:
-        idx = order.index(image_size)
-    except ValueError:
-        idx = 0
-    step = 1 if scale == 2 else 2
-    return order[min(len(order) - 1, idx + step)]
 
 
 def _get_channel_or_404(db: Session, channel_id: int) -> Channel:
@@ -293,7 +285,10 @@ def _produce_image(
     return gemini_client.generate_image(final_prompt, references, aspect_ratio, image_size)
 
 
-def _complete_generation(db: Session, generation: Generation, image_bytes: bytes) -> None:
+def _complete_generation(
+    db: Session, generation: Generation, image_bytes: bytes,
+    upscale_level: int | None = None,
+) -> None:
     if generation.name:
         filename = _unique_filename(
             STORAGE_DIR / str(generation.channel_id),
@@ -315,10 +310,12 @@ def _complete_generation(db: Session, generation: Generation, image_bytes: bytes
     # Auto-upscale + auto-download per the user's settings. Runs in a daemon
     # thread so the gallery shows "done" immediately; the upscaled file is
     # picked up via the cache-busted image_url on the next poll.
-    threading.Thread(target=_auto_post_process, args=(generation.id,), daemon=True).start()
+    threading.Thread(
+        target=_auto_post_process, args=(generation.id, upscale_level), daemon=True,
+    ).start()
 
 
-def _auto_post_process(generation_id: int) -> None:
+def _auto_post_process(generation_id: int, level_override: int | None = None) -> None:
     import shutil
 
     from db import SessionLocal
@@ -329,7 +326,9 @@ def _auto_post_process(generation_id: int) -> None:
         generation = db.get(Generation, generation_id)
         if generation is None or generation.status != "done" or not generation.image_url:
             return
-        level, auto_download, download_dir = auto_process_settings(db)
+        settings_level, auto_download, download_dir = auto_process_settings(db)
+        level = settings_level if level_override is None else level_override
+        level = max(0, min(4, int(level)))
         if level > 0 and upscaler.is_available():
             try:
                 _upscale_in_place(db, generation, level)
@@ -388,6 +387,7 @@ def _run_single(
     batch_id: str | None = None,
     name: str | None = None,
     project_id: int | None = None,
+    upscale_level: int | None = None,
 ) -> Generation:
     generation = _create_generation(
         db, channel, prompt, aspect_ratio, ref_strength, image_size,
@@ -395,7 +395,7 @@ def _run_single(
     )
     try:
         image_bytes = _produce_image(prompt, references, aspect_ratio, ref_strength, image_size)
-        _complete_generation(db, generation, image_bytes)
+        _complete_generation(db, generation, image_bytes, upscale_level)
     except Exception as exc:  # noqa: BLE001 - persist any failure on the row
         _fail_generation(db, generation, exc)
     return generation
@@ -419,11 +419,12 @@ def generate_single(
         references,
         body.aspect_ratio,
         body.ref_strength,
-        body.image_size,
+        "1K",  # always 1K from the API; upscaling is local
         body.asset_ids,
         body.generation_ids,
         name=name,
         project_id=body.project_id,
+        upscale_level=body.upscale_level,
     )
 
 
@@ -471,7 +472,7 @@ def generate_batch(
             ref_a, ref_g = main_asset_ids, main_generation_ids
         generation = _create_generation(
             db, channel, clean_prompt, body.aspect_ratio, body.ref_strength,
-            body.image_size, ref_a, ref_g, batch_id, item_name,
+            "1K", ref_a, ref_g, batch_id, item_name,
             project_id=body.project_id,
         )
         jobs.append((generation, refs))
@@ -485,9 +486,7 @@ def generate_batch(
         def guarded_produce(prompt, refs):
             if stop.is_set():
                 raise _BatchSkipped()
-            return _produce_image(
-                prompt, refs, body.aspect_ratio, body.ref_strength, body.image_size
-            )
+            return _produce_image(prompt, refs, body.aspect_ratio, body.ref_strength, "1K")
 
         in_flight: dict = {}
         with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
@@ -504,7 +503,9 @@ def generate_batch(
                 for future in done_futures:
                     generation = in_flight.pop(future)
                     try:
-                        _complete_generation(db, generation, future.result())
+                        _complete_generation(
+                            db, generation, future.result(), body.upscale_level
+                        )
                     except _BatchSkipped:
                         _skip_generation(db, generation)
                     except QuotaExceededError as exc:
@@ -526,9 +527,9 @@ def generate_batch(
                 continue
             try:
                 image_bytes = _produce_image(
-                    generation.prompt, refs, body.aspect_ratio, body.ref_strength, body.image_size
+                    generation.prompt, refs, body.aspect_ratio, body.ref_strength, "1K"
                 )
-                _complete_generation(db, generation, image_bytes)
+                _complete_generation(db, generation, image_bytes, body.upscale_level)
             except QuotaExceededError as exc:
                 # Fail this row, then stop the whole batch immediately.
                 _fail_generation(db, generation, exc)
@@ -558,7 +559,7 @@ def regenerate_generation(
     prompt = (body.prompt or source.prompt).strip()
     aspect_ratio = body.aspect_ratio or source.aspect_ratio
     ref_strength = body.ref_strength or source.ref_strength
-    image_size = body.image_size or source.image_size
+    image_size = "1K"  # always 1K from the API; upscaling is local
 
     ref_asset_ids = json.loads(source.ref_asset_ids or "[]")
     ref_generation_ids = json.loads(source.ref_generation_ids or "[]")
@@ -574,6 +575,7 @@ def regenerate_generation(
         ref_asset_ids,
         ref_generation_ids,
         project_id=source.project_id,
+        upscale_level=body.upscale_level,
     )
 
 
@@ -602,9 +604,9 @@ def retry_generation(generation_id: int, db: Session = Depends(get_db)):
             references,
             generation.aspect_ratio,
             generation.ref_strength,
-            generation.image_size,
+            "1K",  # always 1K from the API; upscaling is local
         )
-        _complete_generation(db, generation, image_bytes)
+        _complete_generation(db, generation, image_bytes, None)
     except Exception as exc:  # noqa: BLE001 - persist any failure on the row
         _fail_generation(db, generation, exc)
     return generation

@@ -28,6 +28,7 @@ export default function ChannelWorkspace() {
   const view = searchParams.get("view") || "create";
   const [selectMode, setSelectMode] = useState(false);
   const [deleteSelection, setDeleteSelection] = useState(() => new Set());
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -160,7 +161,7 @@ export default function ChannelWorkspace() {
     }
   };
 
-  const handleGenerate = async ({ prompt, aspect_ratio, ref_strength }) => {
+  const handleGenerate = async ({ prompt, aspect_ratio, ref_strength, upscale_level }) => {
     setGenerating(true);
     try {
       const generation = await api.generate(channelId, {
@@ -170,6 +171,7 @@ export default function ChannelWorkspace() {
         project_id: unassignedView ? undefined : routeProjectId || undefined,
         aspect_ratio: aspect_ratio || aspectRatio,
         ref_strength: ref_strength || refStrength,
+        upscale_level,
       });
       if (generation.status === "error") setError(generation.error || "Generation failed");
       await load();
@@ -180,7 +182,7 @@ export default function ChannelWorkspace() {
     }
   };
 
-  const handleGenerateBatch = async ({ items, aspect_ratio, ref_strength, image_size, parallel }) => {
+  const handleGenerateBatch = async ({ items, aspect_ratio, ref_strength, upscale_level, parallel }) => {
     setGenerating(true);
     try {
       const rows = await api.generateBatch(channelId, {
@@ -190,7 +192,7 @@ export default function ChannelWorkspace() {
         project_id: unassignedView ? undefined : routeProjectId || undefined,
         aspect_ratio: aspect_ratio || aspectRatio,
         ref_strength: ref_strength || refStrength,
-        image_size: image_size || "1K",
+        upscale_level,
         parallel: Boolean(parallel),
       });
       const failed = rows.filter((r) => r.status === "error");
@@ -270,12 +272,13 @@ export default function ChannelWorkspace() {
   const handleDeleteSelected = async () => {
     const ids = [...deleteSelection];
     if (!ids.length) return;
-    if (
-      !window.confirm(
-        `Permanently delete ${ids.length} image(s) from the database and disk? This cannot be undone.`,
-      )
-    )
+    // Two-step in-app confirm — browser confirm() dialogs can be silently
+    // suppressed ("prevent this page from creating additional dialogs").
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
       return;
+    }
+    setConfirmingDelete(false);
     try {
       const results = await Promise.allSettled(ids.map((id) => api.deleteGeneration(id)));
       const failures = results.filter((r) => r.status === "rejected").length;
@@ -617,6 +620,7 @@ export default function ChannelWorkspace() {
                           onClick={() => {
                             setSelectMode(!selectMode);
                             setDeleteSelection(new Set());
+                            setConfirmingDelete(false);
                           }}
                         >
                           {selectMode ? "Cancel selection" : "Select"}
@@ -628,11 +632,14 @@ export default function ChannelWorkspace() {
                             </span>
                             <button
                               type="button"
-                              className="danger"
+                              className={confirmingDelete ? "danger" : "danger"}
                               onClick={handleDeleteSelected}
                               disabled={deleteSelection.size === 0}
+                              title="Permanently delete the selected images from the database and disk"
                             >
-                              🗑 Delete selected
+                              {confirmingDelete
+                                ? `⚠ Click again to delete ${deleteSelection.size} image(s)`
+                                : "🗑 Delete selected"}
                             </button>
                           </>
                         )}

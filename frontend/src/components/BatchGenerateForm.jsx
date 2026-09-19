@@ -65,7 +65,7 @@ export default function BatchGenerateForm({
   const [pickerRow, setPickerRow] = useState(null);
   const [aspect, setAspect] = useState("16:9");
   const [strength, setStrength] = useState("balanced");
-  const [size, setSize] = useState("1K");
+  const [upscale, setUpscale] = useState(4);
   const [parallel, setParallel] = useState(false);
   const masterRef = useRef(null);
 
@@ -180,7 +180,7 @@ export default function BatchGenerateForm({
         }),
       aspect_ratio: aspect,
       ref_strength: strength,
-      image_size: size,
+      upscale_level: upscale,
       parallel,
     });
     setPrompts([createRow()]);
@@ -299,11 +299,11 @@ export default function BatchGenerateForm({
           <GenerationOptions
             aspect={aspect}
             strength={strength}
-            size={size}
+            upscale={upscale}
             onChange={(patch) => {
               if (patch.aspect !== undefined) setAspect(patch.aspect);
               if (patch.strength !== undefined) setStrength(patch.strength);
-              if (patch.size !== undefined) setSize(patch.size);
+              if (patch.upscale !== undefined) setUpscale(patch.upscale);
             }}
           />
 
