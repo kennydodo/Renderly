@@ -26,7 +26,7 @@ const FLOW_JS = path.join(DIR, "flow.js");
 const DEFAULT_CONFIG = {
   shotlistPath: path.join(DIR, "shotlist.json"),
   outPath: "",
-  channel: "The Nature Made Us",
+  channel: "",
   refs: [
     path.join(DIR, "refs", "CHAR-HUMAN-FEMALE-01-SIT.webp"),
     path.join(DIR, "refs", "CHAR HUMAN MAKE.webp"),
@@ -215,7 +215,40 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/start") {
       await readBody(req);
-      startRun(loadConfig());
+      const config = loadConfig();
+      if (!(config.channel || "").trim()) {
+        // Fresh install / cleared channel: fall back to the first channel
+        // that actually exists in this Renderly instead of a hardcoded name.
+        try {
+          const channels = await fetchChannels();
+          if (!channels.length) {
+            return sendJson(res, 400, {
+              error:
+                "no Renderly channels exist yet - create one in the Renderly UI first",
+            });
+          }
+          config.channel = channels[0].name;
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      } else {
+        // Fail fast with the available list when the saved channel is gone
+        // (renamed, other machine) instead of failing inside the browser later.
+        try {
+          const channels = await fetchChannels();
+          if (
+            channels.length &&
+            !channels.some((c) => c.name === config.channel)
+          ) {
+            return sendJson(res, 400, {
+              error: `channel "${config.channel}" does not exist in this Renderly - available: ${channels.map((c) => c.name).join(", ")}`,
+            });
+          }
+        } catch {
+          /* backend down: flow.js reports per card; let the batch run */
+        }
+      }
+      startRun(config);
       return sendJson(res, 200, { started: true });
     }
     if (req.method === "POST" && req.url === "/api/stop") {

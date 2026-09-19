@@ -63,8 +63,17 @@ export default function FlowDriver() {
 
   const loadChannels = useCallback(async () => {
     try {
-      setChannels(await driverFetch("/api/channels"));
+      const list = await driverFetch("/api/channels");
+      setChannels(list);
       setChannelsError("");
+      // Self-heal: a saved channel that no longer exists on this machine
+      // (fresh install, renamed channel) would fail at Start - fall back to
+      // the first available one so the batch just works.
+      setConfigState((cfg) => {
+        if (!cfg || !list.length) return cfg;
+        if (list.some((c) => c.name === cfg.channel)) return cfg;
+        return { ...cfg, channel: list[0].name };
+      });
     } catch (err) {
       setChannelsError(err.message);
     }
