@@ -1017,15 +1017,24 @@ async function attachRefs(page, refPaths) {
     if (!ready) return { attached: false, reason: "gallery tiles never appeared after upload" };
   }
 
-  // Open the ingredient panel (toggle button), select the ref options,
-  // then confirm with "Add to prompt".
+  // Open the ingredient panel ("Add assets to the project" dialog), click the
+  // options matching the ref filenames, then close the dialog. Flow attaches
+  // immediately on selection; older builds showed an "Add to prompt" confirm.
   const addBtn = page
     .getByRole("button", { name: "Add ingredients to the prompt box" })
     .first();
+  // A panel left open by a previous failed card swallows the click
+  // (overlay intercepts pointer events) - close it first.
+  if ((await addBtn.getAttribute("aria-expanded").catch(() => null)) === "true") {
+    await addBtn.click({ timeout: 10000 }).catch(() => {});
+    await sleep(1500);
+  }
   await addBtn.click({ timeout: 20000 });
   const addPromptBtn = page.getByRole("button", { name: "Add to prompt" }).first();
-  await addPromptBtn.waitFor({ timeout: 20000 });
-  await sleep(800);
+  const hasConfirm = await addPromptBtn
+    .waitFor({ timeout: 4000 })
+    .then(() => true)
+    .catch(() => false);
 
   let selected = 0;
   for (const name of names) {
@@ -1044,20 +1053,25 @@ async function attachRefs(page, refPaths) {
 
   // Some Flow builds attach immediately on selection and close the panel;
   // others wait for "Add to prompt". Handle both.
-  const stillOpen = await addPromptBtn.isVisible().catch(() => false);
-  if (stillOpen) {
-    await addPromptBtn.click({ timeout: 10000 });
+  if (hasConfirm) {
+    const stillOpen = await addPromptBtn.isVisible().catch(() => false);
+    if (stillOpen) {
+      await addPromptBtn.click({ timeout: 10000 });
+    }
   }
-  await sleep(2500);
+  await sleep(2000);
+
+  // Always close the dialog - a leftover overlay blocks every later card.
+  await page.keyboard.press("Escape").catch(() => {});
+  await sleep(1000);
+  const closeBtn = page.getByRole("button", { name: "Close" }).first();
+  if (await closeBtn.isVisible().catch(() => false)) {
+    await closeBtn.click({ timeout: 5000 }).catch(() => {});
+    await sleep(1000);
+  }
 
   let chip = await page.evaluate(() => window.__renderly.hasIngredientChip()).catch(() => false);
-  if (!chip && stillOpen) {
-    // Close the panel and re-check — the chip may render after closing.
-    await addBtn.click().catch(() => {});
-    await sleep(1500);
-    chip = await page.evaluate(() => window.__renderly.hasIngredientChip()).catch(() => false);
-  }
-  return { attached: !!chip || !stillOpen, how: `panel: ${selected} selected` };
+  return { attached: !!chip || !hasConfirm, how: `panel: ${selected} selected` };
 }
 
 /* ================= Main ================= */
