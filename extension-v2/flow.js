@@ -1027,7 +1027,7 @@ async function attachRefs(page, refPaths) {
   // (overlay intercepts pointer events) - close it first.
   if ((await addBtn.getAttribute("aria-expanded").catch(() => null)) === "true") {
     await addBtn.click({ timeout: 10000 }).catch(() => {});
-    await sleep(1500);
+    await sleep(1200);
   }
   await addBtn.click({ timeout: 20000 });
   const addPromptBtn = page.getByRole("button", { name: "Add to prompt" }).first();
@@ -1035,17 +1035,29 @@ async function attachRefs(page, refPaths) {
     .waitFor({ timeout: 4000 })
     .then(() => true)
     .catch(() => false);
+  const search = page.getByRole("textbox", { name: "Search assets" }).first();
+  await search.waitFor({ timeout: 10000 }).catch(() => {});
 
   let selected = 0;
   for (const name of names) {
-    const opt = page.getByRole("option", { name }).first();
     try {
-      await opt.click({ timeout: 15000 });
+      // Filter the virtual-scrolled asset list to this ref before clicking -
+      // otherwise the tile under the locator can be recycled to another
+      // asset between resolve and click (wrong ref attached).
+      if (await search.isVisible().catch(() => false)) {
+        await search.fill("");
+        await search.fill(name);
+        await sleep(800);
+      }
+      await page.getByRole("option", { name }).first().click({ timeout: 10000 });
       selected++;
-      await sleep(600);
+      await sleep(400);
     } catch {
       console.log(`  ⚠ gallery option not found: ${name}`);
     }
+  }
+  if (await search.isVisible().catch(() => false)) {
+    await search.fill("").catch(() => {});
   }
   if (!selected) {
     return { attached: false, reason: "no matching options in the ingredient panel" };
@@ -1059,15 +1071,15 @@ async function attachRefs(page, refPaths) {
       await addPromptBtn.click({ timeout: 10000 });
     }
   }
-  await sleep(2000);
 
-  // Always close the dialog - a leftover overlay blocks every later card.
+  // Close the dialog promptly - a leftover overlay blocks every later card.
+  await sleep(500);
   await page.keyboard.press("Escape").catch(() => {});
-  await sleep(1000);
+  await sleep(600);
   const closeBtn = page.getByRole("button", { name: "Close" }).first();
   if (await closeBtn.isVisible().catch(() => false)) {
-    await closeBtn.click({ timeout: 5000 }).catch(() => {});
-    await sleep(1000);
+    await closeBtn.click({ timeout: 4000 }).catch(() => {});
+    await sleep(600);
   }
 
   let chip = await page.evaluate(() => window.__renderly.hasIngredientChip()).catch(() => false);
