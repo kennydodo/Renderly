@@ -1532,22 +1532,43 @@ function buildDock() {
       setCardStatus(card.id, "Filling prompt…");
       const input = getPromptInput();
       if (!input) throw new Error("Flow's prompt box not found (run Diagnose)");
-      // Flow's box rejects programmatic insertion while the window is unfocused.
-      try {
-        await sendToBackground({ type: "focusPage" });
-      } catch {
-        /* ignore */
+      // Flow accepts programmatic insertion while the window is backgrounded
+      // (element.focus() + execCommand) — same as extension-v2. Only steal OS
+      // focus as a last-resort fallback when insertion fails, or when the user
+      // enables "Bring Flow window to front" in the settings.
+      const { focusFlow } = await chrome.storage.local.get("focusFlow");
+      if (focusFlow === true) {
+        try {
+          await sendToBackground({ type: "focusPage" });
+        } catch {
+          /* ignore */
+        }
       }
-      let filled = setPromptText(input, prompt);
+      const fillOnce = () => setPromptText(getPromptInput() || input, prompt);
+      let filled = fillOnce();
       if (!filled) {
         // One retry after a short pause — focus/DOM can settle late.
         await sleep(400);
-        filled = setPromptText(getPromptInput() || input, prompt);
+        filled = fillOnce();
       }
       if (!filled) {
         // Editor state can settle asynchronously — re-check before giving up.
         await sleep(600);
         filled = promptFilled(getPromptInput() || input, prompt);
+      }
+      if (!filled && focusFlow !== true) {
+        setCardStatus(card.id, "Retrying with window focus…");
+        try {
+          await sendToBackground({ type: "focusPage" });
+        } catch {
+          /* ignore */
+        }
+        await sleep(300);
+        filled = fillOnce();
+        if (!filled) {
+          await sleep(400);
+          filled = promptFilled(getPromptInput() || input, prompt);
+        }
       }
       if (!filled) {
         const { pasteDialog } = await chrome.storage.local.get("pasteDialog");
@@ -1928,6 +1949,28 @@ function buildDock() {
   });
   const pasteSetting = buildSettingItem("Prompt fill fallback", pasteCheckLabel);
 
+  const focusCheckLabel = document.createElement("label");
+  focusCheckLabel.style.cssText =
+    "display:flex;align-items:center;gap:6px;font-size:12px;color:#e8eaed;cursor:pointer;";
+  const focusCheck = document.createElement("input");
+  focusCheck.type = "checkbox";
+  focusCheck.onchange = async () => {
+    await chrome.storage.local.set({ focusFlow: focusCheck.checked });
+    setStatus(
+      focusCheck.checked
+        ? "Flow window is brought to the front while running."
+        : "Flow runs in the background — window focus is only used when auto-fill fails."
+    );
+  };
+  focusCheckLabel.appendChild(focusCheck);
+  const focusCheckText = document.createElement("span");
+  focusCheckText.textContent = "Bring Flow window to front while running";
+  focusCheckLabel.appendChild(focusCheckText);
+  chrome.storage.local.get("focusFlow").then(({ focusFlow }) => {
+    focusCheck.checked = focusFlow === true;
+  });
+  const focusSetting = buildSettingItem("Window focus", focusCheckLabel);
+
   const diagSetting = buildSettingItem("Diagnose page", diagBtn);
 
   settingsRow.appendChild(backendSetting.wrap);
@@ -1937,6 +1980,7 @@ function buildDock() {
   settingsRow.appendChild(scaleSetting.wrap);
   settingsRow.appendChild(retrySetting.wrap);
   settingsRow.appendChild(pasteSetting.wrap);
+  settingsRow.appendChild(focusSetting.wrap);
   settingsRow.appendChild(diagSetting.wrap);
 
   const resetBtn = document.createElement("button");
