@@ -844,7 +844,7 @@ function isFinalResultUrl(src) {
   }
 }
 
-async function waitForNewImage(page, beforeSet, timeoutMs, onTick) {
+async function waitForNewImage(page, beforeSet, timeoutMs, onTick, consumed) {
   const started = Date.now();
   const STABLE_MS = 5000;
   const STABLE_MS_ANY = 20000;
@@ -852,19 +852,17 @@ async function waitForNewImage(page, beforeSet, timeoutMs, onTick) {
   let candidate = null;
   let candidateSince = 0;
   let blockLogged = false;
+  // A result belongs to exactly one card: never accept a URL that an
+  // earlier card already saved, even if it re-enters the DOM later.
+  const isFresh = (s) =>
+    !beforeSet.has(s) && !(consumed && consumed.has(s)) && isFinalResultUrl(s);
   while (Date.now() - started < timeoutMs) {
-    let fresh = (await page.evaluate(() => window.__renderly.takeNewSrcs())).filter(
-      (s) => !beforeSet.has(s)
-    );
-    // Only finished results count — grid previews, composer placeholders and
-    // picker thumbnails live on other hosts and would false-positive the
-    // stability check.
-    fresh = fresh.filter((s) => isFinalResultUrl(s));
+    let fresh = (await page.evaluate(() => window.__renderly.takeNewSrcs())).filter(isFresh);
     // Full-DOM sweep every ~3s: catches src swaps on reused tiles and
     // anything the observer missed. Cheap enough at this interval.
     if (!fresh.length && ++tick % 2 === 0) {
       const all = await page.evaluate(() => window.__renderly.collectImages());
-      fresh = all.filter((s) => !beforeSet.has(s) && isFinalResultUrl(s));
+      fresh = all.filter(isFresh);
     }
     if (fresh.length) {
       // Flow inserts the tile with a placeholder URL, then swaps to the
@@ -878,25 +876,50 @@ async function waitForNewImage(page, beforeSet, timeoutMs, onTick) {
     }
     const stableFor = candidate ? Date.now() - candidateSince : 0;
     if (candidate && stableFor >= STABLE_MS) {
-      if (isFinalResultUrl(candidate)) return candidate;
+      if (isFinalResultUrl(candidate)) {
+        if (consumed) consumed.add(candidate);
+        return candidate;
+      }
       const busyRes = await page
         .evaluate(() => window.__renderly.generationBusy())
         .catch(() => null);
-      if (!busyRes || !busyRes.busy) return candidate;
+      if (!busyRes || !busyRes.busy) {
+        if (consumed) consumed.add(candidate);
+        return candidate;
+      }
       if (!blockLogged && busyRes.detail) {
         console.log(`\n  ⚠ busy-check blocking acceptance: ${JSON.stringify(busyRes.detail)}`);
         blockLogged = true;
       }
       // Not finished by host or button state — a URL stable this long is
       // accepted anyway; a hard guarantee that a card can't stall.
-      if (stableFor >= STABLE_MS_ANY) return candidate;
+      if (stableFor >= STABLE_MS_ANY) {
+        if (consumed) consumed.add(candidate);
+        return candidate;
+      }
     }
     if (onTick) onTick(Math.round((Date.now() - started) / 1000));
     await sleep(1500);
   }
   // Timeout: return the best candidate seen (may be null) — the caller
   // reports the timeout but the image, if any, is still salvaged.
+  if (candidate && consumed) consumed.add(candidate);
   return candidate;
+}
+
+// After a failed card its generation may still be running on Flow's side —
+// wait it out so the next card does not adopt the result or stack a
+// duplicate generation on top of it.
+async function waitForIdle(page, timeoutMs) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const busy = await page
+      .evaluate(() => window.__renderly.generationBusy())
+      .catch(() => null);
+    if (!busy || !busy.busy) return true;
+    await sleep(1500);
+  }
+  return false;
 }
 
 async function fetchImageDataUrl(page, src) {
@@ -1048,13 +1071,14 @@ async function attachRefs(page, refPaths) {
     await sleep(1200);
   }
   const search = page.getByRole("textbox", { name: "Search assets" }).first();
+  // The new Flow UI hosts the panel in a CDK overlay WITHOUT role="dialog";
+  // a generic dialog check would see unrelated dialogs and no-op the open.
   const dialogOpen = async () =>
     (await search.isVisible().catch(() => false)) ||
     (await page
       .locator('[role="listbox"][aria-label="Asset list"]')
       .isVisible()
-      .catch(() => false)) ||
-    (await page.locator('div[role="dialog"]').count()) > 0;
+      .catch(() => false));
   const openDialog = async () => {
     if (await dialogOpen()) return;
     await addBtn.click({ timeout: 10000 });
@@ -1122,7 +1146,7 @@ async function attachRefs(page, refPaths) {
   }
 
   let chip = await page.evaluate(() => window.__renderly.hasIngredientChip()).catch(() => false);
-  return { attached: !!chip || !hasConfirm, how: `panel: ${selected} selected` };
+  return { attached: !!chip, how: `panel: ${selected} selected` };
 }
 
 /* ================= Main ================= */
@@ -1294,6 +1318,8 @@ async function runFlowSession(page, opts, cards) {
   }
 
   await installHelpers(page);
+  // Result URLs already saved by this batch - never attributed twice.
+  const consumed = new Set();
   const promptUp = await page
     .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
       timeout: 15000,
@@ -1453,7 +1479,13 @@ async function runFlowSession(page, opts, cards) {
     //    composer wipe (select-all + insert on each fill) also clears the
     //    ingredient chips, so they never survive from the previous card.
     const cardRefs = card.refs.filter((r) => !opts.refs.includes(r));
-    const pending = [...masterRefPaths, ...cardRefs].slice(0, 3); // Flow allows up to 3 ingredients
+    // Card-specific refs win over global ones when Flow's 3-ingredient cap
+    // forces a cut - they are what makes THIS image on-model.
+    const pending = [...cardRefs, ...masterRefPaths].slice(0, 3);
+    const cut = [...cardRefs, ...masterRefPaths].length - pending.length;
+    if (cut > 0) {
+      console.log(`  ⚠ ${cut} reference(s) dropped - Flow allows up to 3 per generation`);
+    }
     if (pending.length) {
       console.log(`  attaching ${pending.length} reference image(s) via Flow's gallery…`);
       const res = await attachRefs(page, pending);
@@ -1483,13 +1515,19 @@ async function runFlowSession(page, opts, cards) {
       .evaluate(() => window.__renderly.generationBusy())
       .catch(() => null);
     const alreadyDone = (await page.evaluate(() => window.__renderly.takeNewSrcs()))
-      .some((s) => isFinalResultUrl(s) && !beforeSet.has(s));
+      .some((s) => isFinalResultUrl(s) && !beforeSet.has(s) && !consumed.has(s));
     if (alreadyDone || (busyRes && busyRes.busy)) {
       console.log("  auto-generation already started with the ingredient — skipping trigger");
     } else {
       for (let attempt = 1; attempt <= 4; attempt++) {
         gen = await page.evaluate(() => window.__renderly.triggerGenerate());
         if (gen.clicked && gen.enabled !== false) break;
+        // a generation may have started on its own mid-retry - never stack
+        // a duplicate on top of it
+        const busyNow = await page
+          .evaluate(() => window.__renderly.generationBusy())
+          .catch(() => null);
+        if (busyNow && busyNow.busy) break;
         if (attempt < 4) {
           console.log(`  submit not enabled (attempt ${attempt}) — refilling prompt…`);
           await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
@@ -1507,7 +1545,7 @@ async function runFlowSession(page, opts, cards) {
     process.stdout.write("  waiting for Flow…");
     const src = await waitForNewImage(page, beforeSet, opts.timeout, (secs) =>
       process.stdout.write(` ${secs}s`)
-    );
+    , consumed);
     console.log("");
     if (!src) {
       // Forensics: what images were on the page when we gave up? If the
@@ -1568,6 +1606,12 @@ async function runFlowSession(page, opts, cards) {
       } catch (err) {
         failed++;
         console.log(`  ✕ failed: ${err.message}`);
+        // The failed card's generation may still be running on Flow's
+        // side - wait it out so the next card does not adopt its result
+        // or queue a duplicate generation on top of it.
+        if (!(await waitForIdle(page, 120000))) {
+          console.log("  ⚠ Flow still busy after the failure - continuing");
+        }
       }
       await sleep(1500);
     }
