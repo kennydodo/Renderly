@@ -27,6 +27,7 @@ const DEFAULT_CONFIG = {
   shotlistPath: path.join(DIR, "shotlist.json"),
   outPath: "",
   channel: "",
+  project: "",
   refs: [
     path.join(DIR, "refs", "CHAR-HUMAN-FEMALE-01-SIT.webp"),
     path.join(DIR, "refs", "CHAR HUMAN MAKE.webp"),
@@ -64,6 +65,7 @@ function startRun(config) {
   }
 
   const args = ["--file", config.shotlistPath, "--channel", config.channel];
+  if ((config.project || "").trim()) args.push("--project", config.project.trim());
   if ((config.refs || "").trim()) args.push("--refs", config.refs.trim());
   if ((config.master || "").trim()) args.push("--master", config.master.trim());
   if ((config.outPath || "").trim()) args.push("--out", config.outPath.trim());
@@ -192,6 +194,27 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/api/channels") {
       return sendJson(res, 200, await fetchChannels());
     }
+    if (req.method === "GET" && req.url.startsWith("/api/projects")) {
+      // Proxy the backend's project list for a channel (name or id).
+      const q = new URL(req.url, "http://localhost").searchParams;
+      const channel = (q.get("channel") || "").trim();
+      try {
+        let channelId = channel;
+        if (!/^\d+$/.test(channelId)) {
+          const channels = await fetchChannels();
+          const match = channels.find(
+            (c) => c.name.toLowerCase() === channelId.toLowerCase()
+          );
+          if (!match) return sendJson(res, 200, []);
+          channelId = String(match.id);
+        }
+        const res2 = await fetch(`${BACKEND}/api/projects?channel_id=${channelId}`);
+        if (!res2.ok) throw new Error(`HTTP ${res2.status}`);
+        return sendJson(res, 200, await res2.json());
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message });
+      }
+    }
     if (req.method === "POST" && req.url === "/api/pick/shotlist") {
       return sendJson(res, 200, {
         paths: await pickDialog("pick-file.ps1"),
@@ -206,7 +229,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/config") {
       const body = await readBody(req);
       const config = loadConfig();
-      for (const key of ["shotlistPath", "outPath", "channel", "refs", "master"]) {
+      for (const key of ["shotlistPath", "outPath", "channel", "project", "refs", "master"]) {
         if (typeof body[key] === "string") config[key] = body[key];
       }
       if (body.upscale !== undefined) config.upscale = Number(body.upscale) || 0;

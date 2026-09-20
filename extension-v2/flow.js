@@ -47,6 +47,7 @@ function parseArgs(argv) {
     else if (a === "--prompt") opts.prompt = next();
     else if (a === "--master") opts.master = next();
     else if (a === "--channel") opts.channel = next();
+    else if (a === "--project") opts.project = next();
     else if (a === "--backend") opts.backend = String(next()).replace(/\/+$/, "");
     else if (a === "--refs")
       opts.refs = String(next())
@@ -80,6 +81,7 @@ Options:
   --prompt "<text>"  Single prompt run
   --master "<text>"  Style prefix prepended to every card prompt
   --channel <id>     Renderly channel id — results are imported via /api/channels/{id}/import
+  --project <id/name> Renderly project inside the channel — imports land there
   --refs <a,b,...>   Global reference images (attached once, persist for every card)
   --versions <1-4>   Generations per card (default 1)
   --upscale <0-4>    Renderly GPU upscale factor after import; 0 disables (default 2)
@@ -909,7 +911,13 @@ function dataUrlToBuffer(dataUrl) {
   return { mime: m[1], buffer: Buffer.from(m[2], "base64") };
 }
 
-async function importToRenderly(backend, channelId, filePath, name, prompt) {
+async function fetchProjects(backend, channelId) {
+  const res = await fetch(`${backend}/api/projects?channel_id=${channelId}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function importToRenderly(backend, channelId, filePath, name, prompt, projectId) {
   const form = new FormData();
   // Explicit MIME type — the backend rejects parts without image/* (415).
   form.append(
@@ -919,6 +927,7 @@ async function importToRenderly(backend, channelId, filePath, name, prompt) {
   );
   form.append("prompt", prompt || "Generated in Google Flow");
   if (name) form.append("name", name);
+  if (projectId) form.append("project_id", String(projectId));
   const res = await fetch(`${backend}/api/channels/${channelId}/import`, {
     method: "POST",
     body: form,
@@ -1146,6 +1155,32 @@ async function main() {
       channelId = String(match.id);
     }
     opts.channel = channelId;
+    // Resolve the target project: numeric id accepted as-is, otherwise match
+    // the project name inside the channel (imports land in the channel's
+    // default/unsorted view when absent or unresolvable).
+    opts.projectId = null;
+    if ((opts.project || "").trim()) {
+      const rawProject = String(opts.project).trim();
+      if (/^\d+$/.test(rawProject)) {
+        opts.projectId = Number(rawProject);
+      } else {
+        try {
+          const projects = await fetchProjects(opts.backend, channelId);
+          const match = projects.find(
+            (p) => (p.name || "").toLowerCase() === rawProject.toLowerCase()
+          );
+          if (match) {
+            opts.projectId = match.id;
+          } else {
+            console.log(
+              `⚠ project "${rawProject}" not found in the channel — imports land in the channel default`
+            );
+          }
+        } catch (err) {
+          console.log(`⚠ could not resolve project: ${err.message}`);
+        }
+      }
+    }
   }
 
   if (opts.importOnly) {
@@ -1175,7 +1210,8 @@ async function main() {
           opts.channel,
           filePath,
           baseName,
-          composePrompt(opts, card)
+          composePrompt(opts, card),
+          opts.projectId
         );
         console.log(`✓ ${record.name} imported`);
         if (opts.upscale > 0) {
@@ -1456,7 +1492,8 @@ async function runFlowSession(page, opts, cards) {
         opts.channel,
         filePath,
         finalBase,
-        composePrompt(opts, card)
+        composePrompt(opts, card),
+        opts.projectId
       );
       costUsd += record.cost_usd || 0;
       console.log(`  imported to Renderly as "${record.name}"`);

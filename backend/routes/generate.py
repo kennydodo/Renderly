@@ -761,9 +761,18 @@ async def import_generation(
     file: UploadFile = File(...),
     prompt: str = Form(default="Imported from Google Flow"),
     name: str = Form(default=""),
+    project_id: int = Form(default=None),
     db: Session = Depends(get_db),
 ):
     channel = _get_channel_or_404(db, channel_id)
+    target_project_id = _default_project_id(db, channel.id)
+    if project_id:
+        project = db.get(Project, project_id)
+        if project is None or project.channel_id != channel.id:
+            raise HTTPException(
+                status_code=400, detail="Project does not belong to this channel"
+            )
+        target_project_id = project.id
     mime_type = file.content_type or "image/png"
     if not mime_type.startswith("image/"):
         raise HTTPException(status_code=415, detail="Only image files can be imported")
@@ -796,7 +805,7 @@ async def import_generation(
         filename = stored_name
     generation = Generation(
         channel_id=channel.id,
-        project_id=_default_project_id(db, channel.id),
+        project_id=target_project_id,
         name=display_name,
         prompt=prompt_text,
         model="google-flow-import",

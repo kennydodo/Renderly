@@ -16,6 +16,7 @@ export default function FlowDriver() {
   const [config, setConfigState] = useState(null);
   const [channels, setChannels] = useState([]);
   const [channelsError, setChannelsError] = useState("");
+  const [projects, setProjects] = useState([]);
   const [pickPending, setPickPending] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
@@ -72,7 +73,7 @@ export default function FlowDriver() {
       setConfigState((cfg) => {
         if (!cfg || !list.length) return cfg;
         if (list.some((c) => c.name === cfg.channel)) return cfg;
-        return { ...cfg, channel: list[0].name };
+        return { ...cfg, channel: list[0].name, project: "" };
       });
     } catch (err) {
       setChannelsError(err.message);
@@ -82,6 +83,29 @@ export default function FlowDriver() {
   useEffect(() => {
     loadChannels();
   }, [loadChannels]);
+
+  // Load the projects of the selected channel and self-heal a stale project.
+  useEffect(() => {
+    if (!channels.length || !(config?.channel || "").trim()) return;
+    let cancelled = false;
+    driverFetch(
+      `/api/projects?channel=${encodeURIComponent(config.channel)}`,
+    )
+      .then((list) => {
+        if (cancelled) return;
+        setProjects(list);
+        setConfigState((cfg) => {
+          if (!cfg) return cfg;
+          if (!cfg.project && !list.length) return cfg;
+          if (list.some((p) => String(p.id) === String(cfg.project))) return cfg;
+          return { ...cfg, project: list[0] ? String(list[0].id) : "" };
+        });
+      })
+      .catch(() => setProjects([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [channels, config?.channel]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -230,6 +254,32 @@ export default function FlowDriver() {
             <p className="muted small">
               {channelsError} — type the channel name manually or start the backend.
             </p>
+          )}
+
+          <div style={{ height: "10px" }} />
+
+          {label("Project (imports land in this project)")}
+          {projects.length ? (
+            <select
+              value={config.project || ""}
+              onChange={(e) => setConfig({ ...config, project: e.target.value })}
+              style={{ width: "100%" }}
+            >
+              <option value="">Channel default (Unsorted)</option>
+              {projects.map((p) => (
+                <option key={p.id} value={String(p.id)}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={config.project || ""}
+              placeholder="Project id (optional — blank = channel default)"
+              onChange={(e) => setConfig({ ...config, project: e.target.value })}
+              style={{ width: "100%" }}
+            />
           )}
 
           <div style={{ height: "10px" }} />
