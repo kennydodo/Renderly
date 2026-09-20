@@ -446,14 +446,18 @@ async function installHelpers(page) {
         // Flow's submit is "Start generation" — "generat" covers it.
         return /generat|submit|send|create|start/i.test(label);
       });
-      if (byAria && !byAria.disabled) return { clicked: true, how: describeEl(byAria) };
+      if (byAria) {
+        // The submit stays disabled until the composer registers the text;
+        // report that distinctly so the caller can refill and retry.
+        return { clicked: !byAria.disabled, enabled: !byAria.disabled, how: describeEl(byAria) };
+      }
       const byText = buttons.find(
         (b) => /generate|create|render|send|submit/i.test(b.textContent || "") && !b.disabled
       );
-      if (byText) return { clicked: true, how: describeEl(byText) };
+      if (byText) return { clicked: true, enabled: true, how: describeEl(byText) };
       const submit = buttons.find((b) => b.getAttribute("type") === "submit" && !b.disabled);
-      if (submit) return { clicked: true, how: describeEl(submit) };
-      return { clicked: false, how: null };
+      if (submit) return { clicked: true, enabled: true, how: describeEl(submit) };
+      return { clicked: false, enabled: false, how: null };
     };
 
     // Only images Flow itself produced (or page-local blob:/data: URLs)
@@ -852,11 +856,15 @@ async function waitForNewImage(page, beforeSet, timeoutMs, onTick) {
     let fresh = (await page.evaluate(() => window.__renderly.takeNewSrcs())).filter(
       (s) => !beforeSet.has(s)
     );
+    // Only finished results count — grid previews, composer placeholders and
+    // picker thumbnails live on other hosts and would false-positive the
+    // stability check.
+    fresh = fresh.filter((s) => isFinalResultUrl(s));
     // Full-DOM sweep every ~3s: catches src swaps on reused tiles and
     // anything the observer missed. Cheap enough at this interval.
     if (!fresh.length && ++tick % 2 === 0) {
       const all = await page.evaluate(() => window.__renderly.collectImages());
-      fresh = all.filter((s) => !beforeSet.has(s));
+      fresh = all.filter((s) => !beforeSet.has(s) && isFinalResultUrl(s));
     }
     if (fresh.length) {
       // Flow inserts the tile with a placeholder URL, then swaps to the
@@ -1026,9 +1034,10 @@ async function attachRefs(page, refPaths) {
     if (!ready) return { attached: false, reason: "gallery tiles never appeared after upload" };
   }
 
-  // Open the ingredient panel ("Add assets to the project" dialog), click the
-  // options matching the ref filenames, then close the dialog. Flow attaches
-  // immediately on selection; older builds showed an "Add to prompt" confirm.
+  // Open the ingredient panel ("Add ingredients to the prompt box"). The new
+  // Flow UI hosts it in a CDK overlay WITHOUT role="dialog" - detect it by
+  // its "Search assets" box / "Asset list" listbox instead, otherwise the
+  // toggle click closes the panel it just opened.
   const addBtn = page
     .getByRole("button", { name: "Add ingredients to the prompt box" })
     .first();
@@ -1040,6 +1049,11 @@ async function attachRefs(page, refPaths) {
   }
   const search = page.getByRole("textbox", { name: "Search assets" }).first();
   const dialogOpen = async () =>
+    (await search.isVisible().catch(() => false)) ||
+    (await page
+      .locator('[role="listbox"][aria-label="Asset list"]')
+      .isVisible()
+      .catch(() => false)) ||
     (await page.locator('div[role="dialog"]').count()) > 0;
   const openDialog = async () => {
     if (await dialogOpen()) return;
@@ -1057,7 +1071,7 @@ async function attachRefs(page, refPaths) {
   let selected = 0;
   for (const name of names) {
     try {
-      await openDialog(); // new Flow closes the dialog after each selection
+      await openDialog(); // some Flow builds close the panel after each selection
       // Filter the virtual-scrolled asset list to this ref before clicking -
       // otherwise the tile under the locator can be recycled to another
       // asset between resolve and click (wrong ref attached).
@@ -1073,11 +1087,15 @@ async function attachRefs(page, refPaths) {
       console.log(`  ⚠ gallery option not found: ${name}`);
     }
   }
+  if (!selected) {
+    // Close the panel before giving up - a leftover overlay backdrop blocks
+    // every later card ("intercepts pointer events").
+    await page.keyboard.press("Escape").catch(() => {});
+    await sleep(600);
+    return { attached: false, reason: "no matching options in the ingredient panel" };
+  }
   if (await search.isVisible().catch(() => false)) {
     await search.fill("").catch(() => {});
-  }
-  if (!selected) {
-    return { attached: false, reason: "no matching options in the ingredient panel" };
   }
 
   // Some Flow builds attach immediately on selection and close the panel;
@@ -1425,11 +1443,17 @@ async function runFlowSession(page, opts, cards) {
       console.log("  Run `node flow.js --diag` and adjust the fill logic for your Flow build.");
     }
 
+    // 1b. Snapshot BEFORE attaching refs: Flow may auto-generate the moment
+    //     an ingredient lands, so the result URL can appear before an
+    //     attach-time snapshot and never register as fresh.
+    const beforeSet = new Set(await page.evaluate(() => window.__renderly.collectImages()));
+    await page.evaluate(() => window.__renderly.resetNewSrcs());
+
     // 2. References — attached on EVERY card (and every version): Flow's
     //    composer wipe (select-all + insert on each fill) also clears the
     //    ingredient chips, so they never survive from the previous card.
     const cardRefs = card.refs.filter((r) => !opts.refs.includes(r));
-    const pending = [...masterRefPaths, ...cardRefs];
+    const pending = [...masterRefPaths, ...cardRefs].slice(0, 3); // Flow allows up to 3 ingredients
     if (pending.length) {
       console.log(`  attaching ${pending.length} reference image(s) via Flow's gallery…`);
       const res = await attachRefs(page, pending);
@@ -1452,13 +1476,32 @@ async function runFlowSession(page, opts, cards) {
       }
     }
 
-    // 3. Snapshot, then trigger (or catch an auto-generation).
-    const beforeSet = new Set(await page.evaluate(() => window.__renderly.collectImages()));
-    await page.evaluate(() => window.__renderly.resetNewSrcs());
-    const gen = await page.evaluate(() => window.__renderly.triggerGenerate());
-    if (!gen.clicked) {
-      console.log("  ⚠ no Generate button found — press Flow's Generate yourself.");
-      await pause("  Press Enter after triggering…");
+    // 3. Trigger unless Flow already auto-generates (the ingredient drop can
+    //    start the run by itself) or a finished result already landed.
+    let gen = { clicked: true, enabled: true, how: "auto" };
+    const busyRes = await page
+      .evaluate(() => window.__renderly.generationBusy())
+      .catch(() => null);
+    const alreadyDone = (await page.evaluate(() => window.__renderly.takeNewSrcs()))
+      .some((s) => isFinalResultUrl(s) && !beforeSet.has(s));
+    if (alreadyDone || (busyRes && busyRes.busy)) {
+      console.log("  auto-generation already started with the ingredient — skipping trigger");
+    } else {
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        gen = await page.evaluate(() => window.__renderly.triggerGenerate());
+        if (gen.clicked && gen.enabled !== false) break;
+        if (attempt < 4) {
+          console.log(`  submit not enabled (attempt ${attempt}) — refilling prompt…`);
+          await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+          await sleep(2000);
+        }
+      }
+      if (!gen.clicked) {
+        console.log(`  ⚠ no enabled Generate button (${gen.how || "none"}) — press Flow's Generate yourself.`);
+        await pause("  Press Enter after triggering…");
+      } else if (gen.enabled === false) {
+        console.log(`  ⚠ submit stayed disabled (${gen.how}) — generation may not start.`);
+      }
     }
 
     process.stdout.write("  waiting for Flow…");
