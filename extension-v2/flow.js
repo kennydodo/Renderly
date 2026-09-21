@@ -844,7 +844,7 @@ function isFinalResultUrl(src) {
   }
 }
 
-async function waitForNewImage(page, beforeSet, timeoutMs, onTick, consumed) {
+async function waitForNewImage(page, timeoutMs, onTick, sessionSeen) {
   const started = Date.now();
   const STABLE_MS = 5000;
   const STABLE_MS_ANY = 20000;
@@ -852,10 +852,10 @@ async function waitForNewImage(page, beforeSet, timeoutMs, onTick, consumed) {
   let candidate = null;
   let candidateSince = 0;
   let blockLogged = false;
-  // A result belongs to exactly one card: never accept a URL that an
-  // earlier card already saved, even if it re-enters the DOM later.
-  const isFresh = (s) =>
-    !beforeSet.has(s) && !(consumed && consumed.has(s)) && isFinalResultUrl(s);
+  // A result belongs to exactly one card: a URL is acceptable only if this
+  // session has NEVER seen it before - grid results, ref uploads and
+  // stragglers from failed cards are all in sessionSeen.
+  const isFresh = (s) => isFinalResultUrl(s) && !sessionSeen.has(s);
   while (Date.now() - started < timeoutMs) {
     let fresh = (await page.evaluate(() => window.__renderly.takeNewSrcs())).filter(isFresh);
     // Full-DOM sweep every ~3s: catches src swaps on reused tiles and
@@ -876,46 +876,46 @@ async function waitForNewImage(page, beforeSet, timeoutMs, onTick, consumed) {
     }
     const stableFor = candidate ? Date.now() - candidateSince : 0;
     if (candidate && stableFor >= STABLE_MS) {
-      if (isFinalResultUrl(candidate)) {
-        if (consumed) consumed.add(candidate);
-        return candidate;
-      }
+      // consume every fresh URL at acceptance, not just the candidate —
+      // one generation can surface several URLs and the extras must never
+      // be attributed to the next card
+      for (const s of fresh) sessionSeen.add(s);
+      sessionSeen.add(candidate);
+      if (isFinalResultUrl(candidate)) return candidate;
       const busyRes = await page
         .evaluate(() => window.__renderly.generationBusy())
         .catch(() => null);
-      if (!busyRes || !busyRes.busy) {
-        if (consumed) consumed.add(candidate);
-        return candidate;
-      }
+      if (!busyRes || !busyRes.busy) return candidate;
       if (!blockLogged && busyRes.detail) {
         console.log(`\n  ⚠ busy-check blocking acceptance: ${JSON.stringify(busyRes.detail)}`);
         blockLogged = true;
       }
       // Not finished by host or button state — a URL stable this long is
       // accepted anyway; a hard guarantee that a card can't stall.
-      if (stableFor >= STABLE_MS_ANY) {
-        if (consumed) consumed.add(candidate);
-        return candidate;
-      }
+      if (stableFor >= STABLE_MS_ANY) return candidate;
     }
     if (onTick) onTick(Math.round((Date.now() - started) / 1000));
     await sleep(1500);
   }
   // Timeout: return the best candidate seen (may be null) — the caller
   // reports the timeout but the image, if any, is still salvaged.
-  if (candidate && consumed) consumed.add(candidate);
+  if (candidate) sessionSeen.add(candidate);
   return candidate;
 }
 
 // After a failed card its generation may still be running on Flow's side —
-// wait it out so the next card does not adopt the result or stack a
-// duplicate generation on top of it.
-async function waitForIdle(page, timeoutMs) {
+// wait it out and mark every URL it produces as seen, so the next card does
+// not adopt the result or queue a duplicate generation on top of it.
+async function waitForIdle(page, timeoutMs, sessionSeen) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
     const busy = await page
       .evaluate(() => window.__renderly.generationBusy())
       .catch(() => null);
+    const urls = await page.evaluate(() => window.__renderly.collectImages()).catch(() => []);
+    for (const u of urls) {
+      if (isFinalResultUrl(u)) sessionSeen.add(u);
+    }
     if (!busy || !busy.busy) return true;
     await sleep(1500);
   }
@@ -1003,20 +1003,37 @@ function mimeOf(p) {
   return "image/webp";
 }
 
+// PNG IHDR / JPEG SOF - enough to tell a ref-plate echo from a generation
+// (generations come in the motion-code canvas size, refs in their own).
+function imageDimensions(buf) {
+  if (!buf || buf.length < 24) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  }
+  if (buf[0] === 0xff && buf[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) { i++; continue; }
+      const marker = buf[i + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 &&
+          marker !== 0xc8 && marker !== 0xcc) {
+        return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+      }
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
+
 /**
- * Attach reference images as Flow ingredients:
- *  1. ensure every ref exists in Flow's gallery (upload via drop — the
- *     global drop handler uploads files; tiles get the filename as label)
- *  2. open the ingredient picker ("Add ingredients to the prompt box")
- *  3. click the gallery tiles matching the ref filenames, then "Done editing"
- *  4. verify the Ingredient chip is present in the composer
+ * Make sure every ref exists in Flow's gallery: upload the missing ones via
+ * drop (the global drop handler uploads files; tiles get the filename as
+ * label). Used both for the once-per-batch pre-upload and by attachRefs.
  */
-async function attachRefs(page, refPaths) {
-  const names = refPaths.map((p) => path.basename(p));
+async function ensureRefsInGallery(page, refPaths) {
   const labelHas = (labelList, name) =>
     labelList.some((l) => l.toLowerCase() === name.toLowerCase());
-
-  const labels = await page.evaluate(() => window.__renderly.galleryLabels()).catch(() => []);
+  let labels = await page.evaluate(() => window.__renderly.galleryLabels()).catch(() => []);
   let missing = refPaths.filter((p) => !labelHas(labels, path.basename(p)));
   // The grid hydrates lazily — give the tiles a moment before deciding
   // anything is missing, otherwise refs get uploaded twice.
@@ -1033,28 +1050,81 @@ async function attachRefs(page, refPaths) {
       await sleep(1000);
     }
   }
-  if (missing.length) {
-    console.log(`  uploading ${missing.length} ref(s) to Flow's gallery via drop…`);
-    const payloads = missing.map((p) => ({
+  if (!missing.length) return true;
+  console.log(`  uploading ${missing.length} ref(s) to Flow's gallery via drop…`);
+  // small chunks: dropping a dozen full-res files at once allocates them
+  // all inside the page and crashes the tab
+  const CHUNK = 3;
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const chunk = missing.slice(i, i + CHUNK);
+    const payloads = chunk.map((p) => ({
       name: path.basename(p),
       mime: mimeOf(p),
       b64: fs.readFileSync(p).toString("base64"),
     }));
     const up = await page.evaluate((pls) => window.__renderly.dropFiles(pls), payloads);
-    if (!up.ok) return { attached: false, reason: up.reason };
-    const deadline = Date.now() + 30000;
-    let ready = false;
-    while (Date.now() < deadline) {
-      const nowLabels = await page
-        .evaluate(() => window.__renderly.galleryLabels())
-        .catch(() => []);
-      if (names.every((n) => labelHas(nowLabels, n))) {
-        ready = true;
-        break;
-      }
-      await sleep(1500);
+    if (!up.ok) return false;
+    await sleep(2500);
+  }
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const nowLabels = await page
+      .evaluate(() => window.__renderly.galleryLabels())
+      .catch(() => []);
+    if (missing.every((p) => labelHas(nowLabels, path.basename(p)))) {
+      return true;
     }
-    if (!ready) return { attached: false, reason: "gallery tiles never appeared after upload" };
+    await sleep(1500);
+  }
+  return false;
+}
+
+/**
+ * Open the ingredient panel if needed and mark every asset preview URL as
+ * seen: panel tiles are GALLERY ASSETS (uploaded refs, background plates) -
+ * they must never be accepted as a card's generation result.
+ */
+async function harvestAssetPanel(page, sessionSeen) {
+  const addBtn = page
+    .getByRole("button", { name: "Add ingredients to the prompt box" })
+    .first();
+  const search = page.getByRole("textbox", { name: "Search assets" }).first();
+  const isOpen = async () =>
+    (await search.isVisible().catch(() => false)) ||
+    (await page
+      .locator('[role="listbox"][aria-label="Asset list"]')
+      .isVisible()
+      .catch(() => false));
+  if (!(await isOpen().catch(() => false))) {
+    await addBtn.click({ timeout: 10000 }).catch(() => {});
+    await search.waitFor({ timeout: 10000 }).catch(() => {});
+    await sleep(1500);
+  }
+  const urls = await page
+    .evaluate(() => {
+      const lb = document.querySelector('[role="listbox"][aria-label="Asset list"]');
+      if (!lb) return [];
+      return [...lb.querySelectorAll("img")]
+        .map((i) => String(i.currentSrc || i.src || ""))
+        .filter(Boolean);
+    })
+    .catch(() => []);
+  for (const u of urls) sessionSeen.add(u);
+}
+
+/**
+ * Attach reference images as Flow ingredients:
+ *  1. ensure every ref exists in Flow's gallery (upload via drop — the
+ *     global drop handler uploads files; tiles get the filename as label)
+ *  2. open the ingredient picker ("Add ingredients to the prompt box")
+ *  3. click the gallery tiles matching the ref filenames, then "Done editing"
+ *  4. verify the Ingredient chip is present in the composer
+ */
+async function attachRefs(page, refPaths, sessionSeen) {
+  const names = refPaths.map((p) => path.basename(p));
+
+  if (!(await ensureRefsInGallery(page, refPaths))) {
+    return { attached: false, reason: "gallery tiles never appeared after upload" };
   }
 
   // Open the ingredient panel ("Add ingredients to the prompt box"). The new
@@ -1086,6 +1156,8 @@ async function attachRefs(page, refPaths) {
     await sleep(1000);
   };
   await openDialog();
+  // the panel's asset previews are gallery uploads, not results
+  await harvestAssetPanel(page, sessionSeen);
   const addPromptBtn = page.getByRole("button", { name: "Add to prompt" }).first();
   const hasConfirm = await addPromptBtn
     .waitFor({ timeout: 2000 })
@@ -1094,21 +1166,26 @@ async function attachRefs(page, refPaths) {
 
   let selected = 0;
   for (const name of names) {
-    try {
-      await openDialog(); // some Flow builds close the panel after each selection
-      // Filter the virtual-scrolled asset list to this ref before clicking -
-      // otherwise the tile under the locator can be recycled to another
-      // asset between resolve and click (wrong ref attached).
-      if (await search.isVisible().catch(() => false)) {
-        await search.fill("");
-        await search.fill(name);
-        await sleep(800);
+    let done = false;
+    for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+      try {
+        await openDialog(); // some Flow builds close the panel after each selection
+        await harvestAssetPanel(page, sessionSeen);
+        // Filter the virtual-scrolled asset list to this ref before clicking -
+        // otherwise the tile under the locator can be recycled to another
+        // asset between resolve and click (wrong ref attached).
+        if (await search.isVisible().catch(() => false)) {
+          await search.fill("");
+          await search.fill(name);
+          await sleep(attempt === 1 ? 800 : 1600);
+        }
+        await page.getByRole("option", { name }).first().click({ timeout: 10000 });
+        selected++;
+        done = true;
+        await sleep(400);
+      } catch {
+        if (attempt === 3) console.log(`  ⚠ gallery option not found: ${name}`);
       }
-      await page.getByRole("option", { name }).first().click({ timeout: 10000 });
-      selected++;
-      await sleep(400);
-    } catch {
-      console.log(`  ⚠ gallery option not found: ${name}`);
     }
   }
   if (!selected) {
@@ -1318,8 +1395,10 @@ async function runFlowSession(page, opts, cards) {
   }
 
   await installHelpers(page);
-  // Result URLs already saved by this batch - never attributed twice.
-  const consumed = new Set();
+  // Every result URL this session saves or sees goes into sessionSeen - a
+  // URL can be accepted as a card's result exactly once, so ref uploads,
+  // grid re-entry and stragglers from failed cards are never misattributed.
+  const sessionSeen = new Set();
   const promptUp = await page
     .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
       timeout: 15000,
@@ -1335,6 +1414,35 @@ async function runFlowSession(page, opts, cards) {
       timeout: 60000,
     });
   }
+
+  // Baseline: everything already on the page belongs to earlier sessions.
+  for (const u of await page.evaluate(() => window.__renderly.collectImages()).catch(() => [])) {
+    if (isFinalResultUrl(u)) sessionSeen.add(u);
+  }
+  // Pre-upload every unique ref for the whole batch ONCE, before any card:
+  // a mid-batch upload creates a fresh gallery asset whose URL would
+  // otherwise be indistinguishable from a generation result.
+  const uniqueRefs = [
+    ...new Set(
+      cards
+        .flatMap((c) => c.refs || [])
+        .map((r) => String(r).trim())
+        .filter(Boolean)
+    ),
+  ];
+  if (uniqueRefs.length) {
+    console.log(`Pre-uploading ${uniqueRefs.length} unique reference image(s) for the batch…`);
+    const okRefs = await ensureRefsInGallery(page, uniqueRefs);
+    await sleep(2000);
+    await harvestAssetPanel(page, sessionSeen);
+    await page.keyboard.press("Escape").catch(() => {});
+    await sleep(800);
+    for (const u of await page.evaluate(() => window.__renderly.collectImages()).catch(() => [])) {
+      if (isFinalResultUrl(u)) sessionSeen.add(u);
+    }
+    if (!okRefs) console.log("  ⚠ some refs did not reach the gallery - cards will generate without them");
+  }
+  const sessionRefs = uniqueRefs;
 
   if (opts.clickDiag !== undefined) {
     // Real (trusted) click on a named control, then diff visible elements.
@@ -1469,10 +1577,9 @@ async function runFlowSession(page, opts, cards) {
       console.log("  Run `node flow.js --diag` and adjust the fill logic for your Flow build.");
     }
 
-    // 1b. Snapshot BEFORE attaching refs: Flow may auto-generate the moment
-    //     an ingredient lands, so the result URL can appear before an
-    //     attach-time snapshot and never register as fresh.
-    const beforeSet = new Set(await page.evaluate(() => window.__renderly.collectImages()));
+    // 1b. Reset the per-card observer so only URLs appearing from attach
+    //     time onward register as new - sessionSeen already contains every
+    //     result this session has ever saved or seen.
     await page.evaluate(() => window.__renderly.resetNewSrcs());
 
     // 2. References — attached on EVERY card (and every version): Flow's
@@ -1488,7 +1595,7 @@ async function runFlowSession(page, opts, cards) {
     }
     if (pending.length) {
       console.log(`  attaching ${pending.length} reference image(s) via Flow's gallery…`);
-      const res = await attachRefs(page, pending);
+      const res = await attachRefs(page, pending, sessionSeen);
       if (res.attached) {
         console.log(`  attached (${res.how})`);
       } else {
@@ -1515,7 +1622,7 @@ async function runFlowSession(page, opts, cards) {
       .evaluate(() => window.__renderly.generationBusy())
       .catch(() => null);
     const alreadyDone = (await page.evaluate(() => window.__renderly.takeNewSrcs()))
-      .some((s) => isFinalResultUrl(s) && !beforeSet.has(s) && !consumed.has(s));
+      .some((s) => isFinalResultUrl(s) && !sessionSeen.has(s));
     if (alreadyDone || (busyRes && busyRes.busy)) {
       console.log("  auto-generation already started with the ingredient — skipping trigger");
     } else {
@@ -1543,11 +1650,62 @@ async function runFlowSession(page, opts, cards) {
     }
 
     process.stdout.write("  waiting for Flow…");
-    const src = await waitForNewImage(page, beforeSet, opts.timeout, (secs) =>
-      process.stdout.write(` ${secs}s`)
-    , consumed);
-    console.log("");
-    if (!src) {
+    let waitedMs = 0;
+    let src = null;
+    let finalBuffer = null;
+    // Ingredient-echo guard: a freshly uploaded/mounted gallery asset (a ref
+    // plate) shows up as a new flow-content URL just like a real result.
+    // A real generation comes in the motion-code canvas size, an echo in
+    // the ref file's own size - never save an echo; trigger instead.
+    const refDims = sessionRefs
+      .map((p) => ({ p, d: imageDimensions(fs.readFileSync(p)) }))
+      .filter((x) => x.d);
+    let echoCount = 0;
+    while (true) {
+      const remaining = opts.timeout - waitedMs;
+      if (remaining <= 0) break;
+      const started = Date.now();
+      src = await waitForNewImage(page, remaining, (secs) => {
+        process.stdout.write(` ${Math.round((waitedMs + (Date.now() - started)) / 1000)}s`);
+      }, sessionSeen);
+      waitedMs += Date.now() - started;
+      console.log("");
+      if (!src) break;
+      const dataUrl = await fetchImageDataUrl(page, src).catch(() => null);
+      if (!dataUrl) { sessionSeen.add(src); src = null; continue; }
+      const { buffer } = dataUrlToBuffer(dataUrl);
+      const dims = imageDimensions(buffer);
+      const echo = dims && refDims.some((r) => r.d.w === dims.w && r.d.h === dims.h);
+      if (!echo) {
+        finalBuffer = buffer;
+        break;
+      }
+      echoCount++;
+      sessionSeen.add(src);
+      if (echoCount >= 2) {
+        console.log("  ⚠ still receiving ingredient echoes - giving up on this card");
+        break;
+      }
+      console.log(`  ⚠ ingredient echo detected (${dims.w}x${dims.h} matches a ref) - waiting for the real generation…`);
+      const busy = await page
+        .evaluate(() => window.__renderly.generationBusy())
+        .catch(() => null);
+      if (!busy || !busy.busy) {
+        console.log("  no generation is running (the echo faked the trigger) - refilling the prompt and starting it now…");
+        await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+        await sleep(1000);
+        const g2 = await page.evaluate(() => window.__renderly.triggerGenerate());
+        if (!(g2.clicked && g2.enabled !== false)) {
+          console.log(`  ⚠ could not start the generation after the echo (${g2.how || "no button"})`);
+        }
+        waitedMs = 0; // the real generation gets a full window
+      }
+      src = null;
+    }
+    if (!finalBuffer) {
+      if (echoCount >= 2) {
+        throw new Error(`kept receiving ingredient echoes for "${cardLabel}"`);
+      }
       // Forensics: what images were on the page when we gave up? If the
       // result is there at a small size, the threshold needs adjusting.
       const dump = await page.evaluate(() => window.__renderly.imageDump()).catch(() => []);
@@ -1558,12 +1716,8 @@ async function runFlowSession(page, opts, cards) {
       if (seen.length) console.log("  images on page at timeout:\n    " + seen.join("\n    "));
       throw new Error(`timed out waiting for the image of "${cardLabel}"`);
     }
-
-    // 4. Fetch the result, save locally, import to Renderly.
-    const dataUrl = await fetchImageDataUrl(page, src);
-    const { buffer } = dataUrlToBuffer(dataUrl);
     const filePath = uniqueFilePath(opts.out, baseName);
-    fs.writeFileSync(filePath, buffer);
+    fs.writeFileSync(filePath, finalBuffer);
     console.log(`  saved ${filePath}`);
 
     if (opts.channel) {
@@ -1607,9 +1761,9 @@ async function runFlowSession(page, opts, cards) {
         failed++;
         console.log(`  ✕ failed: ${err.message}`);
         // The failed card's generation may still be running on Flow's
-        // side - wait it out so the next card does not adopt its result
-        // or queue a duplicate generation on top of it.
-        if (!(await waitForIdle(page, 120000))) {
+        // side - wait it out and mark its result as seen so the next card
+        // does not adopt it or queue a duplicate generation on top of it.
+        if (!(await waitForIdle(page, 120000, sessionSeen))) {
           console.log("  ⚠ Flow still busy after the failure - continuing");
         }
       }
