@@ -708,8 +708,53 @@ async function installHelpers(page) {
         .map((t) => t.getAttribute("aria-label") || "")
         .filter(Boolean);
 
-    H.hasIngredientChip = () =>
-      deepQueryAll('[aria-label="Ingredient"]').filter(isVisible).length > 0;
+    // Robust "is this asset in the gallery?" check. Flow renders gallery
+    // assets as BUTTONS whose accessible name is the asset name (textContent)
+    // and not always as flow-grid-tile-container with an aria-label, so
+    // checking only tile labels reported refs as missing.
+    H.nameStem = (n) =>
+      String(n || "")
+        .toLowerCase()
+        .replace(/\.(png|jpe?g|webp|gif|bmp)$/i, "")
+        .trim();
+    H.galleryHas = (name) => {
+      const full = String(name || "").toLowerCase();
+      const stem = H.nameStem(name);
+      const hit = (h) => {
+        const s = String(h || "").toLowerCase();
+        return !!s && ((!!full && s.includes(full)) || (!!stem && s.includes(stem)));
+      };
+      return deepQueryAll(
+        'flow-grid-tile-container, [role="option"], [role="listitem"], [role="checkbox"], button, img'
+      )
+        .filter(isVisible)
+        .some((el) =>
+          hit(
+            el.getAttribute("aria-label") ||
+              el.getAttribute("alt") ||
+              (el.textContent || "")
+          )
+        );
+    };
+
+    // Chips live in `flow-ingredient-bar`, NOT inside the ProseMirror editor,
+    // so a select-all in the editor never removes them. Prefer the semantic
+    // tag (FlowImagesGen's primary selector), fall back to the aria chip.
+    H.chips = () => {
+      const byTag = deepQueryAll("flow-image-ingredient-chip").filter(isVisible);
+      if (byTag.length) return byTag;
+      return deepQueryAll("button[aria-label='Ingredient']").filter(isVisible);
+    };
+    H.hasIngredientChip = () => window.__renderly.chips().length > 0;
+    H.chipCount = () => window.__renderly.chips().length;
+
+    // Is the prompt text present in ANY visible composer editor? Focus alone
+    // is not proof - the expanded overlay's editor is not always the active
+    // element.
+    H.composerHasText = (needle) =>
+      deepQueryAll("[contenteditable]")
+        .filter(isVisible)
+        .some((e) => String(e.textContent || "").includes(needle));
 
     H.promptIsFilled = (text) => promptFilled(getPromptInput(), text);
 
@@ -1031,29 +1076,57 @@ function imageDimensions(buf) {
  * label). Used both for the once-per-batch pre-upload and by attachRefs.
  */
 async function ensureRefsInGallery(page, refPaths) {
-  const labelHas = (labelList, name) =>
-    labelList.some((l) => l.toLowerCase() === name.toLowerCase());
-  let labels = await page.evaluate(() => window.__renderly.galleryLabels()).catch(() => []);
-  let missing = refPaths.filter((p) => !labelHas(labels, path.basename(p)));
-  // The grid hydrates lazily — give the tiles a moment before deciding
-  // anything is missing, otherwise refs get uploaded twice.
-  if (missing.length) {
-    const gridDeadline = Date.now() + 15000;
-    while (Date.now() < gridDeadline) {
-      const nowLabels = await page
-        .evaluate(() => window.__renderly.galleryLabels())
-        .catch(() => []);
-      if (nowLabels.length) {
-        missing = refPaths.filter((p) => !labelHas(nowLabels, path.basename(p)));
-        break;
+  const addBtn = page
+    .getByRole("button", { name: "Add ingredients to the prompt box" })
+    .first();
+  const search = page.getByRole("textbox", { name: "Search assets" }).first();
+  const panelOpen = async () =>
+    (await search.isVisible().catch(() => false)) ||
+    (await page
+      .locator('[role="listbox"][aria-label="Asset list"]')
+      .isVisible()
+      .catch(() => false));
+  const openPanel = async () => {
+    if (await panelOpen()) return;
+    await addBtn.click({ timeout: 10000 }).catch(() => {});
+    await search.waitFor({ timeout: 10000 }).catch(() => {});
+    await sleep(1200);
+  };
+  const closePanel = async () => {
+    for (let i = 0; i < 3; i++) {
+      if (!(await panelOpen())) return;
+      await page.keyboard.press("Escape").catch(() => {});
+      await sleep(600);
+      const closeBtn = page.getByRole("button", { name: "Close" }).first();
+      if (await closeBtn.isVisible().catch(() => false)) {
+        await closeBtn.click({ timeout: 4000 }).catch(() => {});
+        await sleep(500);
       }
-      await sleep(1000);
     }
-  }
+  };
+  const missingOf = async () => {
+    const out = [];
+    for (const p of refPaths) {
+      const found = await page
+        .evaluate((n) => window.__renderly.galleryHas(n), path.basename(p))
+        .catch(() => false);
+      if (!found) out.push(p);
+    }
+    return out;
+  };
+
+  // The gallery only exists while the ingredient panel is OPEN. The old code
+  // read project grid tiles instead, so every ref looked missing and got
+  // re-uploaded (or the attach was skipped).
+  await openPanel();
+  let missing = await missingOf();
+  await closePanel();
   if (!missing.length) return true;
+
   console.log(`  uploading ${missing.length} ref(s) to Flow's gallery via drop…`);
   // small chunks: dropping a dozen full-res files at once allocates them
-  // all inside the page and crashes the tab
+  // all inside the page and crashes the tab. Drop with the panel CLOSED -
+  // dropFiles targets the composer, and an open panel would capture it.
   const CHUNK = 3;
   for (let i = 0; i < missing.length; i += CHUNK) {
     const chunk = missing.slice(i, i + CHUNK);
@@ -1066,16 +1139,19 @@ async function ensureRefsInGallery(page, refPaths) {
     if (!up.ok) return false;
     await sleep(2500);
   }
+
+  // Verify with the panel open again.
+  await openPanel();
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
-    const nowLabels = await page
-      .evaluate(() => window.__renderly.galleryLabels())
-      .catch(() => []);
-    if (missing.every((p) => labelHas(nowLabels, path.basename(p)))) {
+    missing = await missingOf();
+    if (!missing.length) {
+      await closePanel();
       return true;
     }
     await sleep(1500);
   }
+  await closePanel();
   return false;
 }
 
@@ -1120,110 +1196,449 @@ async function harvestAssetPanel(page, sessionSeen) {
  *  3. click the gallery tiles matching the ref filenames, then "Done editing"
  *  4. verify the Ingredient chip is present in the composer
  */
-async function attachRefs(page, refPaths, sessionSeen) {
-  const names = refPaths.map((p) => path.basename(p));
+/* ---------- Asset-library helpers (FlowImagesGen's proven model) ---------- */
 
-  if (!(await ensureRefsInGallery(page, refPaths))) {
-    return { attached: false, reason: "gallery tiles never appeared after upload" };
-  }
+/** Is Flow's inline asset library (the prompt box "+" picker) open? */
+async function assetLibraryOpen(page) {
+  return page
+    .locator(
+      "flow-add-menu-asset-list, input.search-input[aria-label='Search assets'], input[placeholder='Search assets'], .asset-list-viewport"
+    )
+    .first()
+    .isVisible()
+    .catch(() => false);
+}
 
-  // Open the ingredient panel ("Add ingredients to the prompt box"). The new
-  // Flow UI hosts it in a CDK overlay WITHOUT role="dialog" - detect it by
-  // its "Search assets" box / "Asset list" listbox instead, otherwise the
-  // toggle click closes the panel it just opened.
+async function openAssetLibrary(page) {
+  if (await assetLibraryOpen(page)) return true;
   const addBtn = page
     .getByRole("button", { name: "Add ingredients to the prompt box" })
     .first();
-  // A panel left open by a previous failed card swallows the click
-  // (overlay intercepts pointer events) - close it first.
-  if ((await addBtn.getAttribute("aria-expanded").catch(() => null)) === "true") {
-    await addBtn.click({ timeout: 10000 }).catch(() => {});
-    await sleep(1200);
+  await addBtn.click({ timeout: 8000 }).catch(() => {});
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (await assetLibraryOpen(page)) {
+      await sleep(600);
+      return true;
+    }
+    await sleep(250);
   }
-  const search = page.getByRole("textbox", { name: "Search assets" }).first();
-  // The new Flow UI hosts the panel in a CDK overlay WITHOUT role="dialog";
-  // a generic dialog check would see unrelated dialogs and no-op the open.
-  const dialogOpen = async () =>
-    (await search.isVisible().catch(() => false)) ||
-    (await page
-      .locator('[role="listbox"][aria-label="Asset list"]')
-      .isVisible()
-      .catch(() => false));
-  const openDialog = async () => {
-    if (await dialogOpen()) return;
-    await addBtn.click({ timeout: 10000 });
-    await search.waitFor({ timeout: 10000 }).catch(() => {});
-    await sleep(1000);
-  };
-  await openDialog();
-  // the panel's asset previews are gallery uploads, not results
-  await harvestAssetPanel(page, sessionSeen);
-  const addPromptBtn = page.getByRole("button", { name: "Add to prompt" }).first();
-  const hasConfirm = await addPromptBtn
-    .waitFor({ timeout: 2000 })
-    .then(() => true)
-    .catch(() => false);
+  return false;
+}
 
-  let selected = 0;
-  for (const name of names) {
-    let done = false;
-    for (let attempt = 1; attempt <= 3 && !done; attempt++) {
-      try {
-        await openDialog(); // some Flow builds close the panel after each selection
-        await harvestAssetPanel(page, sessionSeen);
-        // Filter the virtual-scrolled asset list to this ref before clicking -
-        // otherwise the tile under the locator can be recycled to another
-        // asset between resolve and click (wrong ref attached).
-        if (await search.isVisible().catch(() => false)) {
-          await search.fill("");
-          await search.fill(name);
-          await sleep(attempt === 1 ? 800 : 1600);
+async function closeAssetLibrary(page) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!(await assetLibraryOpen(page))) return true;
+    await page.keyboard.press("Escape").catch(() => {});
+    await sleep(500);
+  }
+  return !(await assetLibraryOpen(page));
+}
+
+/**
+ * Reuse an existing project asset by name. Clicking a result attaches it AND
+ * closes the library in one action; some builds instead show a preview that
+ * still needs "Add to prompt", so the confirm step is conditional.
+ */
+async function attachExistingAsset(page, name, sessionSeen) {
+  if (!(await openAssetLibrary(page))) return false;
+  await harvestAssetPanel(page, sessionSeen);
+  const search = page
+    .locator("input.search-input[aria-label='Search assets'], input[placeholder='Search assets']")
+    .first();
+  const stem = name.replace(/\.[a-z0-9]+$/i, "");
+  const nameLow = name.toLowerCase();
+  const target = stem.toLowerCase();
+  const items = page.locator("button.asset-item[role='option']");
+  const readTitles = async () => {
+    const n = await items.count().catch(() => 0);
+    const out = [];
+    for (let index = 0; index < n; index++) {
+      const title = (
+        (await items
+          .nth(index)
+          .locator("span.asset-title, .asset-title")
+          .first()
+          .innerText()
+          .catch(() => "")) || ""
+      ).trim();
+      out.push({ index, title });
+    }
+    return out;
+  };
+  const searchFor = async (term) => {
+    if (!(await search.isVisible().catch(() => false))) return;
+    await search.fill("").catch(() => {});
+    await search.fill(term).catch(() => {});
+    await sleep(1800);
+  };
+
+  // Search the full filename first (assets uploaded through the picker are
+  // named after the file); fall back to the stem for prefixed assets.
+  await searchFor(name);
+  let rows = await readTitles();
+  if (!rows.length) {
+    await searchFor(stem);
+    rows = await readTitles();
+  }
+
+  // Score so a PROMPT-TITLED generation tile ("Maya holding perfume bottle")
+  // can never beat the actual reference asset ("Maya.png" / "refupload__Maya__…").
+  const fileish = (t) => /\.[a-z0-9]+$/i.test(t) || /refupload/i.test(t);
+  let chosen = -1;
+  let chosenTitle = "";
+  let best = 0;
+  let fuzzy = -1;
+  for (const { index, title } of rows) {
+    if (!title) continue;
+    if (fuzzy < 0) fuzzy = index;
+    const low = title.toLowerCase();
+    const titleStem = low.replace(/\.[a-z0-9]+$/i, "");
+    let score = 0;
+    if (low === nameLow || titleStem === target) score = 3;
+    else if (fileish(title) && (titleStem === target || titleStem.includes(target))) score = 2;
+    else if (fileish(title) && low.includes(target)) score = 1;
+    if (score > best) {
+      best = score;
+      chosen = index;
+      chosenTitle = title;
+      if (score === 3) break;
+    }
+  }
+  if (chosen < 0 && fuzzy >= 0) {
+    chosen = fuzzy;
+    chosenTitle = (rows.find((r) => r.index === fuzzy) || {}).title || "";
+  }
+  if (chosen < 0) return false;
+  console.log(`  reusing project asset "${chosenTitle}" for "${name}"`);
+  await items.nth(chosen).click({ timeout: 8000 }).catch(() => {});
+  await sleep(1800);
+  if (await assetLibraryOpen(page)) {
+    const attach = page.getByRole("button", { name: /add to prompt/i }).first();
+    if (await attach.isVisible().catch(() => false)) {
+      await attach.click({ timeout: 8000 }).catch(() => {});
+      await sleep(1500);
+    }
+  }
+  return true;
+}
+
+/**
+ * Upload one local file through the library's "Upload media" file input and
+ * attach it. ONE file per session - uploading several at once only ever
+ * attaches the first one.
+ */
+async function attachUploadedFile(page, filePath, sessionSeen) {
+  const name = path.basename(filePath);
+  // Reopen the library FRESH: a previous reuse leaves it filtered, and
+  // "Upload media" only exists in the unfiltered view.
+  await closeAssetLibrary(page);
+  await sleep(600);
+  if (!(await openAssetLibrary(page))) {
+    console.log(`  ⚠ could not open the asset library to upload ${name}`);
+    return false;
+  }
+  await harvestAssetPanel(page, sessionSeen);
+  const search = page
+    .locator("input.search-input[aria-label='Search assets'], input[placeholder='Search assets']")
+    .first();
+  await search.fill("").catch(() => {});
+  await sleep(1200);
+  const items = page.locator("button.asset-item[role='option']");
+  const beforeCount = await items.count().catch(() => 0);
+
+  // The control's LABEL is an aria-label ("Upload media") while its
+  // textContent is just the icon ligature ("upload") - so match the
+  // accessible name, not :has-text().
+  const media = page
+    .getByRole("button", { name: /upload media/i })
+    .first();
+  const mediaAlt = page
+    .locator("button[aria-label*='upload' i], [role='menuitem']:has-text('Upload media'), [role='menuitem']:has-text('Upload')")
+    .first();
+  const mediaCount =
+    (await media.count().catch(() => 0)) + (await mediaAlt.count().catch(() => 0));
+  if (mediaCount === 0) {
+    const btns = await page
+      .evaluate(() => {
+        const vis = (el) =>
+          !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+        const out = [];
+        for (const b of document.querySelectorAll(
+          "button, [role='menuitem'], [role='button'], a"
+        )) {
+          if (!vis(b)) continue;
+          const label = b.getAttribute("aria-label") || "";
+          const text = (b.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
+          if (!label && !text) continue;
+          out.push(`${label}|${text}`);
         }
-        await page.getByRole("option", { name }).first().click({ timeout: 10000 });
-        selected++;
-        done = true;
-        await sleep(400);
-      } catch {
-        if (attempt === 3) console.log(`  ⚠ gallery option not found: ${name}`);
+        return out.slice(0, 25);
+      })
+      .catch(() => []);
+    console.log(`  ⚠ no "Upload media" control. Visible controls: ${btns.join(" ; ")}`);
+    return false;
+  }
+
+  // "Upload media" may open a NATIVE file chooser (no <input> in the DOM) or
+  // spawn a hidden input - listen for the chooser while clicking.
+  const mediaTarget = (await media.count().catch(() => 0)) > 0 ? media : mediaAlt;
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser", { timeout: 10000 }).catch(() => null),
+    mediaTarget.click({ timeout: 8000 }).catch(() => {}),
+  ]);
+  if (chooser) {
+    await chooser.setFiles(filePath).catch(() => {});
+  } else {
+    // Pick the IMAGE file input, not merely the first one: the page can host
+    // other (non-image) file inputs, and setting those uploads nothing.
+    let input = null;
+    const pickDeadline = Date.now() + 10000;
+    while (Date.now() < pickDeadline && !input) {
+      const inputs = page.locator("input[type=file]");
+      const n = await inputs.count().catch(() => 0);
+      for (let i = 0; i < n; i++) {
+        const candidate = inputs.nth(i);
+        const accept = (await candidate.getAttribute("accept").catch(() => "")) ?? "";
+        if (accept === "" || /image/i.test(accept)) {
+          input = candidate;
+          break;
+        }
+      }
+      if (!input) await sleep(300);
+    }
+    if (!input) {
+      console.log(`  ⚠ no image file input appeared after clicking "Upload media"`);
+      return false;
+    }
+    await input.setInputFiles(filePath).catch(() => {});
+  }
+
+  // Wait until the upload actually lands: a NEW item in the library, or Flow
+  // marking it selected. Large plates (BG_*.png, 14-18 MB) need real time.
+  // Wait until the upload lands: a NEW item in the library, or Flow marking
+  // it selected. Large plates (BG_*.png, 14-18 MB) need real time. The list
+  // does not always refresh in place, so a miss here is not fatal - the
+  // caller re-attaches from the project once the upload has been indexed.
+  const settle = Date.now() + 60000;
+  let landed = false;
+  while (Date.now() < settle) {
+    const nowCount = await items.count().catch(() => 0);
+    const selected = await page
+      .locator("button.asset-item[role='option'][aria-selected='true'], .asset-item-active")
+      .count()
+      .catch(() => 0);
+    if (nowCount > beforeCount || selected >= 1) {
+      landed = true;
+      await sleep(800);
+      break;
+    }
+    if (!(await assetLibraryOpen(page))) break;
+    await sleep(700);
+  }
+  if (!landed) {
+    console.log(`  uploaded ${name} - it is not listed yet, will attach from the project`);
+    return true;
+  }
+
+  // Attach. "Add to prompt" stays DISABLED until the selection registers, and
+  // a click on a disabled button silently does nothing.
+  const attach = page.getByRole("button", { name: /add to prompt/i }).first();
+  const confirmDeadline = Date.now() + 30000;
+  while (Date.now() < confirmDeadline) {
+    if (!(await assetLibraryOpen(page))) return true; // picker closed = attached
+    if (
+      (await attach.count().catch(() => 0)) > 0 &&
+      (await attach.isEnabled().catch(() => false))
+    ) {
+      await attach.click({ timeout: 8000 }).catch(() => {});
+      await sleep(1500);
+      return true;
+    }
+    await sleep(500);
+  }
+  // Fall back to clicking the newest item (some builds attach on click).
+  const last = items.last();
+  if ((await last.count().catch(() => 0)) > 0) {
+    await last.click({ timeout: 8000 }).catch(() => {});
+    await sleep(1500);
+    return true;
+  }
+  console.log(`  ⚠ uploaded ${name} but could not confirm the attach`);
+  return true;
+}
+
+/**
+ * Attach reference images as Flow ingredients - ONE picker session per ref.
+ *
+ * Flow's picker only ever attaches one selection per session, so each ref is
+ * opened/searched/clicked/closed on its own (FlowImagesGen's model). Existing
+ * project assets are reused by name; a local file is uploaded only when the
+ * name is not found. Refuses to continue unless the composer ends up holding
+ * exactly one chip per requested ref.
+ */
+async function attachRefs(page, refPaths, sessionSeen) {
+  for (const refPath of refPaths) {
+    const name = path.basename(refPath);
+    const chipCount = () =>
+      page.evaluate(() => window.__renderly.chipCount()).catch(() => 0);
+    const before = await chipCount();
+    let ok = await attachExistingAsset(page, name, sessionSeen);
+    let chips = await chipCount();
+    if (!ok || chips <= before) {
+      // Not in the project (or the reuse click did not attach): upload it.
+      console.log(`  "${name}" not in the project - uploading it…`);
+      await attachUploadedFile(page, refPath, sessionSeen);
+      await closeAssetLibrary(page);
+      chips = await chipCount();
+      if (chips <= before) {
+        // The upload populated the project but did not attach the chip - now
+        // attach it through the reuse path, which is the reliable one. The
+        // new asset can take a moment to appear in the library's index, so
+        // retry a few times rather than skipping the card.
+        console.log(`  attaching the uploaded "${name}" from the project…`);
+        for (let attempt = 1; attempt <= 3 && chips <= before; attempt++) {
+          await closeAssetLibrary(page);
+          await sleep(1500);
+          ok = await attachExistingAsset(page, name, sessionSeen);
+          chips = await chipCount();
+        }
       }
     }
-  }
-  if (!selected) {
-    // Close the panel before giving up - a leftover overlay backdrop blocks
-    // every later card ("intercepts pointer events").
-    await page.keyboard.press("Escape").catch(() => {});
-    await sleep(600);
-    return { attached: false, reason: "no matching options in the ingredient panel" };
-  }
-  if (await search.isVisible().catch(() => false)) {
-    await search.fill("").catch(() => {});
-  }
-
-  // Some Flow builds attach immediately on selection and close the panel;
-  // others wait for "Add to prompt". Handle both.
-  if (hasConfirm) {
-    await openDialog().catch(() => {});
-    const stillOpen = await addPromptBtn.isVisible().catch(() => false);
-    if (stillOpen) {
-      await addPromptBtn.click({ timeout: 10000 });
+    if (!ok || chips <= before) {
+      await closeAssetLibrary(page);
+      return { attached: false, reason: `could not attach "${name}"` };
     }
+    await closeAssetLibrary(page);
+    console.log(`  after "${name}": ${chips} chip(s)`);
   }
-
-  // Close the dialog promptly if it is still open - a leftover overlay
-  // blocks every later card.
-  if (await dialogOpen()) {
+  const deadline = Date.now() + 15000;
+  let chips = 0;
+  while (Date.now() < deadline) {
+    chips = await page.evaluate(() => window.__renderly.chipCount()).catch(() => 0);
+    if (chips >= refPaths.length) break;
     await sleep(400);
-    await page.keyboard.press("Escape").catch(() => {});
-    await sleep(600);
-    const closeBtn = page.getByRole("button", { name: "Close" }).first();
-    if (await closeBtn.isVisible().catch(() => false)) {
-      await closeBtn.click({ timeout: 4000 }).catch(() => {});
-      await sleep(600);
-    }
   }
+  if (chips !== refPaths.length) {
+    await closeAssetLibrary(page);
+    return {
+      attached: false,
+      reason: `chip count ${chips} != refs ${refPaths.length}`,
+    };
+  }
+  return { attached: true, how: `${chips} chip(s)` };
+}
 
-  let chip = await page.evaluate(() => window.__renderly.hasIngredientChip()).catch(() => false);
-  return { attached: !!chip, how: `panel: ${selected} selected` };
+/**
+ * Trusted prompt fill: click the real composer, select-all + Delete, then
+ * insert the text at the CDP level so Angular's model actually registers it.
+ * The page-side fillPrompt() mutates the DOM synthetically, which Flow often
+ * ignores - leaving the submit arrow disabled and the card waiting forever.
+ */
+async function trustedFill(page, text) {
+  if (!String(text || "").trim()) return false;
+  const input = page
+    .locator(
+      "flow-rich-text-editor .ProseMirror[contenteditable='true'], div.base-prompt-box div[contenteditable='true'], div[contenteditable='true']"
+    )
+    .first();
+  await input.waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
+  if ((await input.count().catch(() => 0)) === 0) return false;
+  await input.scrollIntoViewIfNeeded().catch(() => {});
+  await input.click({ timeout: 8000 }).catch(() => {});
+  await sleep(300);
+  await page.keyboard.press("Control+a").catch(() => {});
+  await page.keyboard.press("Delete").catch(() => {});
+  await sleep(200);
+  let typed = false;
+  await page.keyboard
+    .insertText(text)
+    .then(() => {
+      typed = true;
+    })
+    .catch(() => {});
+  if (!typed) {
+    await page.keyboard.type(text, { delay: 1 }).catch(() => {});
+  }
+  await sleep(600);
+  // Success = the submit arrow actually armed.
+  const btn = page
+    .locator("button[aria-label='Start generation'], button.generate-icon-button")
+    .first();
+  const deadline = Date.now() + 12000;
+  const needle = text.trim().slice(0, 30);
+  while (Date.now() < deadline) {
+    if (
+      (await btn.count().catch(() => 0)) > 0 &&
+      (await btn.isEnabled().catch(() => false))
+    ) {
+      return true;
+    }
+    if (
+      await page
+        .evaluate((n) => window.__renderly.composerHasText(n), needle)
+        .catch(() => false)
+    ) {
+      await sleep(800);
+      if ((await btn.count().catch(() => 0)) > 0 && (await btn.isEnabled().catch(() => false))) {
+        return true;
+      }
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
+/**
+ * Trusted click on Flow's "Start generation" arrow.
+ *
+ * The page-side triggerGenerate() only REPORTS that a button exists - it never
+ * clicks, relying on a synthetic Enter that Flow's Angular state ignores. That
+ * is why a card could sit "waiting for Flow" forever with nothing running.
+ * This waits for the real button to enable and clicks it for real.
+ */
+async function clickGenerate(page) {
+  const btn = page
+    .locator("button[aria-label='Start generation'], button.generate-icon-button")
+    .first();
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    if ((await btn.count().catch(() => 0)) > 0) {
+      if (await btn.isEnabled().catch(() => false)) {
+        await btn.click({ timeout: 5000 }).catch(() => {});
+        await sleep(1200);
+        const busy = await page
+          .evaluate(() => window.__renderly.generationBusy())
+          .catch(() => null);
+        return { clicked: true, enabled: true, busy: !!(busy && busy.busy) };
+      }
+    }
+    await sleep(400);
+  }
+  return { clicked: false, enabled: false, how: "no enabled Start generation button" };
+}
+
+/**
+ * Detach every ingredient chip. The chips live in `flow-ingredient-bar`, NOT
+ * inside the ProseMirror editor, so a select-all + Delete never removed them;
+ * each chip has its own hover-revealed remove control, clicked with force
+ * because the overlay is transparent until hovered.
+ */
+async function clearChipsTrusted(page) {
+  const chip = page.locator(
+    "flow-image-ingredient-chip button.chip-container, flow-image-ingredient-chip, button[aria-label='Ingredient']"
+  );
+  const rm = page.locator(
+    "flow-image-ingredient-chip div.hover-icon-overlay, flow-image-ingredient-chip mat-icon.hover-icon"
+  );
+  for (let i = 0; i < 12; i++) {
+    const n = await chip.count().catch(() => 0);
+    if (!n) return 0;
+    if ((await rm.count().catch(() => 0)) === 0) return n;
+    await rm.first().click({ force: true, timeout: 4000 }).catch(() => {});
+    await sleep(600);
+  }
+  return chip.count().catch(() => 0);
 }
 
 /* ================= Main ================= */
@@ -1431,16 +1846,13 @@ async function runFlowSession(page, opts, cards) {
     ),
   ];
   if (uniqueRefs.length) {
-    console.log(`Pre-uploading ${uniqueRefs.length} unique reference image(s) for the batch…`);
-    const okRefs = await ensureRefsInGallery(page, uniqueRefs);
-    await sleep(2000);
-    await harvestAssetPanel(page, sessionSeen);
-    await page.keyboard.press("Escape").catch(() => {});
-    await sleep(800);
-    for (const u of await page.evaluate(() => window.__renderly.collectImages()).catch(() => [])) {
-      if (isFinalResultUrl(u)) sessionSeen.add(u);
-    }
-    if (!okRefs) console.log("  ⚠ some refs did not reach the gallery - cards will generate without them");
+    // No pre-upload. Each card's attach reuses the project asset by name and
+    // uploads only when it is missing (FlowImagesGen's model). Uploading via
+    // the picker also keeps assets named after the file, which the name
+    // lookup relies on - the old drop path prefixed them with "refupload__".
+    console.log(
+      `References: ${uniqueRefs.length} unique image(s) - reused from the project, uploaded when missing`
+    );
   }
   const sessionRefs = uniqueRefs;
 
@@ -1566,10 +1978,28 @@ async function runFlowSession(page, opts, cards) {
 
     // 1. Prompt first — Flow may auto-generate the moment a reference
     //    lands in the composer, so the prompt must already be there.
+    //    Detach stale chips FIRST: they survive across cards and runs (they
+    //    live in flow-ingredient-bar, outside the editor the fill wipes) and
+    //    Flow would render the chip's content instead of the prompt.
+    const chipsBefore = await page
+      .evaluate(() => window.__renderly.chipCount())
+      .catch(() => 0);
+    const chipsLeft = await clearChipsTrusted(page);
+    if (chipsBefore > 0) {
+      console.log(`  cleared ${chipsBefore - chipsLeft}/${chipsBefore} stale ingredient chip(s)`);
+    }
+    if (chipsLeft) {
+      throw new Error(
+        `composer still holds ${chipsLeft} ingredient chip(s) before filling - refusing to generate`
+      );
+    }
     process.stdout.write("  filling prompt… ");
-    let filled = await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+    let filled = await trustedFill(page, composePrompt(opts, card));
     if (!filled) {
       await sleep(500);
+      filled = await trustedFill(page, composePrompt(opts, card));
+    }
+    if (!filled) {
       filled = await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
     }
     console.log(filled ? "ok" : "FAILED (Flow may reuse its previous prompt)");
@@ -1599,9 +2029,17 @@ async function runFlowSession(page, opts, cards) {
       if (res.attached) {
         console.log(`  attached (${res.how})`);
       } else {
-        console.log(`  ⚠ could not attach automatically: ${res.reason}`);
-        console.log("    Attach them manually in Flow now, then continue.");
-        await pause("  Press Enter after attaching…");
+        // NEVER generate without the references this card asked for - a
+        // missing ref silently produces the wrong image. The driver service
+        // is non-interactive, so the old manual "attach then press Enter"
+        // path just continued and rendered an unreferenced frame.
+        if (process.stdin && process.stdin.isTTY) {
+          console.log(`  ⚠ could not attach automatically: ${res.reason}`);
+          console.log("    Attach them manually in Flow now, then continue.");
+          await pause("  Press Enter after attaching…");
+        } else {
+          throw new Error(`could not attach ${pending.length} reference(s): ${res.reason}`);
+        }
       }
 
       // The ingredient picker navigates away and can clear the composer —
@@ -1611,33 +2049,45 @@ async function runFlowSession(page, opts, cards) {
         .catch(() => true);
       if (!still) {
         console.log("  prompt lost in the picker — refilling…");
-        await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+        if (!(await trustedFill(page, composePrompt(opts, card)))) {
+          await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+        }
       }
     }
 
-    // 3. Trigger unless Flow already auto-generates (the ingredient drop can
-    //    start the run by itself) or a finished result already landed.
+    // 3. Trigger. ONLY Flow's own busy state counts as "already generating":
+    //    a fresh flow-content URL can just be a reference plate (an echo), and
+    //    treating that as a started generation made the driver skip the
+    //    trigger and then stall with nothing running.
     let gen = { clicked: true, enabled: true, how: "auto" };
+    let triggered = false;
     const busyRes = await page
       .evaluate(() => window.__renderly.generationBusy())
       .catch(() => null);
-    const alreadyDone = (await page.evaluate(() => window.__renderly.takeNewSrcs()))
-      .some((s) => isFinalResultUrl(s) && !sessionSeen.has(s));
-    if (alreadyDone || (busyRes && busyRes.busy)) {
-      console.log("  auto-generation already started with the ingredient — skipping trigger");
+    if (busyRes && busyRes.busy) {
+      triggered = true;
+      console.log("  a generation is already running — skipping trigger");
     } else {
       for (let attempt = 1; attempt <= 4; attempt++) {
-        gen = await page.evaluate(() => window.__renderly.triggerGenerate());
-        if (gen.clicked && gen.enabled !== false) break;
+        gen = await clickGenerate(page);
+        if (gen.clicked) {
+          triggered = true;
+          break;
+        }
         // a generation may have started on its own mid-retry - never stack
         // a duplicate on top of it
         const busyNow = await page
           .evaluate(() => window.__renderly.generationBusy())
           .catch(() => null);
-        if (busyNow && busyNow.busy) break;
+        if (busyNow && busyNow.busy) {
+          triggered = true;
+          break;
+        }
         if (attempt < 4) {
           console.log(`  submit not enabled (attempt ${attempt}) — refilling prompt…`);
-          await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+          if (!(await trustedFill(page, composePrompt(opts, card)))) {
+            await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+          }
           await sleep(2000);
         }
       }
@@ -1691,14 +2141,19 @@ async function runFlowSession(page, opts, cards) {
         .evaluate(() => window.__renderly.generationBusy())
         .catch(() => null);
       if (!busy || !busy.busy) {
-        console.log("  no generation is running (the echo faked the trigger) - refilling the prompt and starting it now…");
-        await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
-        await sleep(1000);
-        const g2 = await page.evaluate(() => window.__renderly.triggerGenerate());
-        if (!(g2.clicked && g2.enabled !== false)) {
-          console.log(`  ⚠ could not start the generation after the echo (${g2.how || "no button"})`);
+        if (triggered) {
+          // We already clicked Generate for this card; the echo is just the
+          // reference plate landing. Keep waiting - never stack a duplicate.
+          console.log("  echo before the generation registered — still waiting");
+        } else {
+          console.log("  no generation is running (the echo faked the trigger) - refilling the prompt and starting it now…");
+          await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+          await sleep(1000);
+          const g2 = await clickGenerate(page);
+          if (g2.clicked) triggered = true;
+          else console.log(`  ⚠ could not start the generation after the echo (${g2.how || "no button"})`);
+          waitedMs = 0; // the real generation gets a full window
         }
-        waitedMs = 0; // the real generation gets a full window
       }
       src = null;
     }
