@@ -45,6 +45,17 @@ Double-click `generate.bat`. Per card: prompt → refs attached → generate →
 download. Multi-card batches should use the **same refs on every card**
 (ingredients persist in the composer across cards within a run).
 
+## Google account (profile)
+
+`--profile <dir>` picks the Chrome profile folder, which is what selects the
+Google account a batch runs as (default `./profile`; the Flow Driver page saves
+it as `profileDir` in `driver-config.json`). Sign a profile in once — no
+terminal interaction needed, it waits for Flow to load, then exits:
+
+```
+node flow.js --login --profile profile-b --timeout 420000
+```
+
 Options (see `node flow.js --help`): `--channel <id>` (import into Renderly
 via `POST /api/channels/{id}/import`), `--upscale <off|HD|2K|4K>`, `--versions <1-4>`,
 `--refs`, `--backend`, `--out`, `--timeout`, `--browser`, `--diag`.
@@ -70,6 +81,14 @@ runs.
 
 ## Notes
 
+- A result is identified by the **redo control** (`Reuse prompt`, which only a
+  generated tile carries) plus **byte ownership** — sha1 of every image already
+  on the page and of every reference's bytes is seeded before each generation,
+  and a result must have unseen bytes. Pixel size is deliberately never used:
+  Flow renders a reference plate and a generated still at the same 1376x768, so
+  a size test rejects every real result and the card then burns its full
+  `--timeout`. Keep it that way — `tests/js/ownership.test.js` fails if a
+  dimension-based rejection comes back.
 - Keep the Renderly backend running (`start.bat`) when using `--channel`.
 - The old extension is untouched in your normal Chrome; this driver uses its
   own profile, so nothing conflicts.

@@ -55,6 +55,12 @@ test("parseArgs accepts the prepare flags", () => {
   );
 });
 
+test("parseArgs takes the profile folder that picks the Google account", () => {
+  const { parseArgs } = loadCli();
+  assert.equal(parseArgs(["--profile", "profile-b"]).profile, "profile-b");
+  assert.equal(parseArgs([]).profile, null, "no --profile keeps the default folder");
+});
+
 test("parseArgs defaults leave generation behaviour untouched", () => {
   const { parseArgs } = loadCli();
   const opts = parseArgs([]);

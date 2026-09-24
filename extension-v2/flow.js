@@ -21,12 +21,20 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
+const crypto = require("crypto");
 const { chromium } = require("playwright");
 
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 const PROFILE_DIR = path.join(__dirname, "profile");
 const OUTPUT_DIR = path.join(__dirname, "output");
 const FLOW_URL = "https://flow.google.com/";
+
+/** The profile folder to launch: --profile wins (relative to this folder). */
+function profileDirFor(opts) {
+  const raw = String(opts.profile || "").trim();
+  if (!raw) return PROFILE_DIR;
+  return path.isAbsolute(raw) ? raw : path.join(__dirname, raw);
+}
 
 /* ================= CLI ================= */
 
@@ -55,6 +63,7 @@ function parseArgs(argv) {
     prepare: false,
     report: null,
     flowProject: null, // Flow project URL or name (NOT Renderly's --project)
+    profile: null, // profile folder override (default: ./profile)
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -65,6 +74,8 @@ function parseArgs(argv) {
     else if (a === "--channel") opts.channel = next();
     else if (a === "--project") opts.project = next();
     else if (a === "--flow-project") opts.flowProject = next();
+    else if (a === "--profile") opts.profile = next();
+    else if (a === "--login") opts.login = true;
     else if (a === "--report") opts.report = path.resolve(next());
     else if (a === "--prepare") opts.prepare = true;
     else if (a === "--backend") opts.backend = String(next()).replace(/\/+$/, "");
@@ -105,6 +116,8 @@ Options:
   --prepare          Open/create the Flow project and upload refs; NEVER generates
   --report <path>    Atomic prepare report (frozen WhisperRadar contract, schema 1)
   --flow-project <url|name>  Flow project to open or create (NOT Renderly's --project)
+  --profile <dir>    Chrome profile folder (default ./profile) — picks the Google account
+  --login            Open that profile and wait until you are signed in, then exit
   --refs <a,b,...>   Global reference images (attached once, persist for every card)
   --versions <1-4>   Generations per card (default 1)
   --upscale <off|HD|2K|4K>  Renderly GPU upscale after import; off disables (default 2K)
@@ -504,13 +517,44 @@ async function installHelpers(page) {
       }
     }
 
-    H.collectImages = () => {
+    H.collectImages = () => H.collectTiles().map((t) => t.src);
+
+    // Every qualifying image with the tile facts the adoption loop needs.
+    // canRedo is the discriminator that matters: Flow puts a "Reuse prompt"
+    // control only on a GENERATED tile, never on a reference plate, so it is
+    // what keeps a ref out of the results - not a size comparison, which is
+    // useless because Flow renders refs and results at the same size.
+    H.collectTiles = () => {
       const out = [];
       deepQueryAll("img").forEach((img) => {
-        if (img.complete && img.naturalWidth >= 512 && img.naturalHeight >= 512) {
-          const src = img.currentSrc || img.src;
-          if (trustedSrc(src)) out.push(src);
+        if (!(img.complete && img.naturalWidth >= 512 && img.naturalHeight >= 512)) return;
+        const src = img.currentSrc || img.src;
+        if (!trustedSrc(src)) return;
+        const tile =
+          (img.closest &&
+            img.closest(
+              "flow-grid-tile-container, [role='listitem'], [role='option'], figure, li"
+            )) ||
+          img.parentElement;
+        let canRedo = false;
+        if (tile) {
+          if (tile.querySelector && tile.querySelector("[aria-label*='Reuse prompt' i]")) {
+            canRedo = true;
+          } else {
+            canRedo = Array.from(tile.querySelectorAll("button, [role='button']")).some((b) =>
+              /reuse prompt/i.test(
+                `${b.getAttribute("aria-label") || ""} ${b.getAttribute("title") || ""}`
+              )
+            );
+          }
         }
+        out.push({
+          src,
+          w: img.naturalWidth,
+          h: img.naturalHeight,
+          canRedo,
+          label: (img.getAttribute("alt") || "").trim(),
+        });
       });
       return out;
     };
@@ -912,30 +956,75 @@ function isFinalResultUrl(src) {
   }
 }
 
-async function waitForNewImage(page, timeoutMs, onTick, sessionSeen) {
+// Hash every image already on the page, plus every reference's own bytes, into
+// seenHashes. Run ONCE per card, before the trigger: hashing during the wait
+// would mark the result itself as seen and the card would never accept it.
+async function seedSeenHashes(page, seenHashes, refPaths) {
+  const started = Date.now();
+  const tiles = await page.evaluate(() => window.__renderly.collectTiles()).catch(() => []);
+  for (const tile of tiles) {
+    const dataUrl = await fetchImageDataUrl(page, tile.src).catch(() => null);
+    if (!dataUrl) continue;
+    const { buffer } = dataUrlToBuffer(dataUrl);
+    if (buffer) seenHashes.add(hashBytes(buffer));
+  }
+  for (const refPath of refPaths || []) {
+    try {
+      seenHashes.add(hashBytes(fs.readFileSync(refPath)));
+    } catch {
+      /* unreadable ref: the label check still covers it */
+    }
+  }
+  console.log(
+    `  ownership: ${seenHashes.size} image(s) known (${tiles.length} on page, ` +
+      `${(refPaths || []).length} ref file(s), ${Math.round((Date.now() - started) / 1000)}s)`
+  );
+  return seenHashes;
+}
+
+// A result is a tile Flow generated for THIS card. All three must hold:
+//   1. the tile carries the redo ("Reuse prompt") control - only generated
+//      tiles have one, so a reference plate can never qualify;
+//   2. it is served from the finished-asset host, not a grid placeholder;
+//   3. its bytes are not in seenHashes - ownership, seeded at the baseline.
+// Pixel size is NEVER a reason to reject: Flow renders references and results
+// at the same 1376x768, so a size test rejects every real generation.
+function tileIsResult(tile, hash, seenHashes) {
+  return Boolean(tile && tile.canRedo && isFinalResultUrl(tile.src) && hash && !seenHashes.has(hash));
+}
+
+async function waitForNewImage(page, timeoutMs, onTick, sessionSeen, seenHashes) {
   const started = Date.now();
   const STABLE_MS = 5000;
-  const STABLE_MS_ANY = 20000;
   let tick = 0;
   let candidate = null;
   let candidateSince = 0;
-  let blockLogged = false;
+  let lastTiles = [];
   // A result belongs to exactly one card: a URL is acceptable only if this
   // session has NEVER seen it before - grid results, ref uploads and
   // stragglers from failed cards are all in sessionSeen.
   const isFresh = (s) => isFinalResultUrl(s) && !sessionSeen.has(s);
   while (Date.now() - started < timeoutMs) {
-    let fresh = (await page.evaluate(() => window.__renderly.takeNewSrcs())).filter(isFresh);
+    // The tiles are the source of truth for canRedo, so snapshot them every
+    // poll and look the candidate up in it.
+    lastTiles = await page.evaluate(() => window.__renderly.collectTiles()).catch(() => []);
+    const tileBySrc = new Map(lastTiles.map((t) => [t.src, t]));
+    const bySrc = (srcs) =>
+      srcs.filter((s) => {
+        if (!isFresh(s)) return false;
+        const tile = tileBySrc.get(s);
+        return Boolean(tile) && tile.canRedo;
+      });
+    let fresh = bySrc(await page.evaluate(() => window.__renderly.takeNewSrcs()).catch(() => []));
     // Full-DOM sweep every ~3s: catches src swaps on reused tiles and
     // anything the observer missed. Cheap enough at this interval.
     if (!fresh.length && ++tick % 2 === 0) {
-      const all = await page.evaluate(() => window.__renderly.collectImages());
-      fresh = all.filter(isFresh);
+      fresh = bySrc(lastTiles.map((t) => t.src));
     }
     if (fresh.length) {
       // Flow inserts the tile with a placeholder URL, then swaps to the
       // final result — always track the newest and accept it only once it
-      // stops changing and the image looks finished.
+      // stops changing and its bytes are verifiably new.
       const newest = fresh[fresh.length - 1];
       if (newest !== candidate) {
         candidate = newest;
@@ -944,31 +1033,50 @@ async function waitForNewImage(page, timeoutMs, onTick, sessionSeen) {
     }
     const stableFor = candidate ? Date.now() - candidateSince : 0;
     if (candidate && stableFor >= STABLE_MS) {
-      // consume every fresh URL at acceptance, not just the candidate —
-      // one generation can surface several URLs and the extras must never
-      // be attributed to the next card
-      for (const s of fresh) sessionSeen.add(s);
-      sessionSeen.add(candidate);
-      if (isFinalResultUrl(candidate)) return candidate;
-      const busyRes = await page
-        .evaluate(() => window.__renderly.generationBusy())
-        .catch(() => null);
-      if (!busyRes || !busyRes.busy) return candidate;
-      if (!blockLogged && busyRes.detail) {
-        console.log(`\n  ⚠ busy-check blocking acceptance: ${JSON.stringify(busyRes.detail)}`);
-        blockLogged = true;
+      const tile = tileBySrc.get(candidate);
+      const dataUrl = await fetchImageDataUrl(page, candidate).catch(() => null);
+      const { buffer } = dataUrl ? dataUrlToBuffer(dataUrl) : { buffer: null };
+      const hash = buffer ? hashBytes(buffer) : null;
+      if (tileIsResult(tile, hash, seenHashes)) {
+        // consume every fresh URL at acceptance, not just the candidate —
+        // one generation can surface several URLs and the extras must never
+        // be attributed to the next card
+        for (const s of fresh) sessionSeen.add(s);
+        sessionSeen.add(candidate);
+        seenHashes.add(hash);
+        return { src: candidate, buffer };
       }
-      // Not finished by host or button state — a URL stable this long is
-      // accepted anyway; a hard guarantee that a card can't stall.
-      if (stableFor >= STABLE_MS_ANY) return candidate;
+      // Not a result: an echo of a known image (hash match), or a tile whose
+      // bytes could not be read. Mark the URL so it is not re-fetched every
+      // poll, but never record its HASH: a transient DOM state (the redo
+      // control not mounted yet) must not make a real result unrecognisable.
+      if (hash && seenHashes.has(hash)) {
+        console.log(`  ingredient echo (bytes already known) - still waiting`);
+      }
+      sessionSeen.add(candidate);
+      candidate = null;
+      candidateSince = 0;
     }
     if (onTick) onTick(Math.round((Date.now() - started) / 1000));
     await sleep(1500);
   }
-  // Timeout: return the best candidate seen (may be null) — the caller
-  // reports the timeout but the image, if any, is still salvaged.
-  if (candidate) sessionSeen.add(candidate);
-  return candidate;
+  // Timeout: salvage only a tile that still carries the redo control, so an
+  // unidentified tile (or a reference plate) is never saved. Returns null when
+  // there is nothing safe to salvage; the caller reports the timeout.
+  for (let i = lastTiles.length - 1; i >= 0; i--) {
+    const tile = lastTiles[i];
+    if (!tile.canRedo || !isFinalResultUrl(tile.src) || sessionSeen.has(tile.src)) continue;
+    const dataUrl = await fetchImageDataUrl(page, tile.src).catch(() => null);
+    const { buffer } = dataUrl ? dataUrlToBuffer(dataUrl) : { buffer: null };
+    const hash = buffer ? hashBytes(buffer) : null;
+    if (tileIsResult(tile, hash, seenHashes)) {
+      sessionSeen.add(tile.src);
+      seenHashes.add(hash);
+      console.log(`  salvaged a finished tile at timeout`);
+      return { src: tile.src, buffer };
+    }
+  }
+  return null;
 }
 
 // After a failed card its generation may still be running on Flow's side —
@@ -1071,26 +1179,12 @@ function mimeOf(p) {
   return "image/webp";
 }
 
-// PNG IHDR / JPEG SOF - enough to tell a ref-plate echo from a generation
-// (generations come in the motion-code canvas size, refs in their own).
-function imageDimensions(buf) {
-  if (!buf || buf.length < 24) return null;
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
-    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
-  }
-  if (buf[0] === 0xff && buf[1] === 0xd8) {
-    let i = 2;
-    while (i + 9 < buf.length) {
-      if (buf[i] !== 0xff) { i++; continue; }
-      const marker = buf[i + 1];
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 &&
-          marker !== 0xc8 && marker !== 0xcc) {
-        return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
-      }
-      i += 2 + buf.readUInt16BE(i + 2);
-    }
-  }
-  return null;
+// sha1 of an image's bytes: the ownership key. A result must have bytes this
+// session has never hashed, which is what makes a reference plate (or a stale
+// tile) impossible to adopt. Size is never used to reject a candidate, so the
+// driver deliberately has no pixel-dimension helper any more.
+function hashBytes(buf) {
+  return crypto.createHash("sha1").update(buf).digest("hex");
 }
 
 /**
@@ -1838,21 +1932,10 @@ async function prepareSession(page, opts, cards) {
     /* no sign-in redirect — the prompt-box check below verifies the state */
   }
   await installHelpers(page);
-  const promptUp = await page
-    .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
-      timeout: 15000,
-    })
-    .then(() => true)
-    .catch(() => false);
-  if (!promptUp) {
-    await pause("Sign into Google in the opened browser window, then press Enter…");
-    await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
-    await installHelpers(page);
-    await page.waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
-      timeout: 60000,
-    });
-  }
 
+  // Land inside a project BEFORE probing for the composer: Flow's landing page
+  // is the project list and has no prompt box at all, so checking it there
+  // always failed ("you are probably not signed in") on a signed-in profile.
   const sessionSeen = new Set();
   let created = false;
   const target = String(opts.flowProject || "").trim();
@@ -1870,6 +1953,23 @@ async function prepareSession(page, opts, cards) {
     created = Boolean(result.created);
   }
   await sleep(1500);
+  await installHelpers(page);
+
+  const landed = /^https?:\/\//i.test(target) ? target : page.url();
+  const promptUp = await page
+    .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
+      timeout: 15000,
+    })
+    .then(() => true)
+    .catch(() => false);
+  if (!promptUp) {
+    await pause("Sign into Google in the opened browser window, then press Enter…");
+    await page.goto(landed, { waitUntil: "domcontentloaded" });
+    await installHelpers(page);
+    await page.waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
+      timeout: 60000,
+    });
+  }
 
   const url = page.url();
   const report = {
@@ -1921,6 +2021,33 @@ async function prepareSession(page, opts, cards) {
   );
 }
 
+/** Sign a profile in once: open Flow and wait for the prompt box to appear. */
+async function loginSession(page, opts) {
+  await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
+  console.log(
+    "Sign into Google in the opened window. This waits for Flow's prompt box, then exits."
+  );
+  const deadline = Date.now() + (Number(opts.timeout) || 240000);
+  while (Date.now() < deadline) {
+    const signedIn = await page
+      .evaluate(() => {
+        const box = document.querySelector(
+          "flow-rich-text-editor .ProseMirror[contenteditable='true'], " +
+            "div.base-prompt-box div[contenteditable='true'], div[contenteditable='true']"
+        );
+        return !!box;
+      })
+      .catch(() => false);
+    if (signedIn) {
+      console.log(`\nSigned in — ${page.url()}`);
+      console.log("This profile is ready for batches.");
+      return;
+    }
+    await sleep(2000);
+  }
+  throw new Error("Timed out waiting for sign-in (use --timeout <ms> to wait longer).");
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -1929,8 +2056,15 @@ async function main() {
   }
 
   const cards = loadCards(opts);
-  if (opts.diag || opts.attachDiag || opts.clickDiag !== undefined || opts.dropTest) {
-    // Diagnostics run without needing cards.
+  if (
+    opts.diag ||
+    opts.attachDiag ||
+    opts.clickDiag !== undefined ||
+    opts.dropTest ||
+    opts.prepare ||
+    opts.login
+  ) {
+    // Diagnostics, prepare and login run without needing cards.
   } else if (!cards || !cards.length) {
     usage();
     process.exitCode = 1;
@@ -1942,7 +2076,6 @@ async function main() {
   if (opts.prepare) {
     // Prepare needs the batch file's refs only — no channel, no backend, no
     // generation, so the whole Renderly-side resolution below is skipped.
-    fs.mkdirSync(PROFILE_DIR, { recursive: true });
     const { context, page } = await launchChrome(opts);
     try {
       await prepareSession(page, opts, cards);
@@ -1952,8 +2085,17 @@ async function main() {
     return;
   }
 
+  if (opts.login) {
+    const { context, page } = await launchChrome(opts);
+    try {
+      await loginSession(page, opts);
+    } finally {
+      await context.close().catch(() => {});
+    }
+    return;
+  }
+
   fs.mkdirSync(opts.out, { recursive: true });
-  fs.mkdirSync(PROFILE_DIR, { recursive: true });
 
   if (opts.channel) {
     // Accept a numeric id or a channel name — resolve names via /api/channels.
@@ -2072,8 +2214,10 @@ async function main() {
 
 /** Launch the persistent-profile Chrome both the generate and prepare paths share. */
 async function launchChrome(opts) {
-  console.log("Launching Chrome (persistent profile keeps you signed in)…");
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+  const profileDir = profileDirFor(opts);
+  fs.mkdirSync(profileDir, { recursive: true });
+  console.log(`Launching Chrome (profile: ${profileDir})…`);
+  const context = await chromium.launchPersistentContext(profileDir, {
     channel: opts.browser || "chrome",
     headless: false,
     viewport: null,
@@ -2107,11 +2251,28 @@ async function runFlowSession(page, opts, cards) {
     /* no sign-in redirect — the prompt-box check below verifies the state */
   }
 
+  // Land inside a project: Flow's landing page is the project list and has no
+  // composer, so the session must open the batch's project (or create one)
+  // before the prompt-box check below.
+  const targetProject = String(opts.flowProject || "").trim();
+  if (targetProject && /^https?:\/\//i.test(targetProject)) {
+    console.log(`Opening Flow project ${targetProject}`);
+    await page.goto(targetProject, { waitUntil: "domcontentloaded" });
+    await sleep(3000);
+  } else {
+    await ensureFlowProject(page, targetProject || null);
+  }
+
   await installHelpers(page);
   // Every result URL this session saves or sees goes into sessionSeen - a
   // URL can be accepted as a card's result exactly once, so ref uploads,
   // grid re-entry and stragglers from failed cards are never misattributed.
   const sessionSeen = new Set();
+  // Byte-ownership baseline: sha1 of every image already on the page, plus
+  // every reference's bytes, seeded before each card's generation. A result
+  // must have unseen bytes - that, and the redo control, is what keeps a
+  // reference plate out of the results. Never a size comparison.
+  const seenHashes = new Set();
   const promptUp = await page
     .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
       timeout: 15000,
@@ -2353,34 +2514,32 @@ async function runFlowSession(page, opts, cards) {
       }
     }
 
+    // 2b. Byte-ownership baseline. Everything on the page now - the reference
+    //     plates that were just attached included - is hashed, so none of it
+    //     can be adopted as this card's result. Hashed here and only here:
+    //     hashing during the wait would mark the result itself as seen.
+    await seedSeenHashes(page, seenHashes, sessionRefs);
+
     // 3. Trigger. ONLY Flow's own busy state counts as "already generating":
     //    a fresh flow-content URL can just be a reference plate (an echo), and
     //    treating that as a started generation made the driver skip the
     //    trigger and then stall with nothing running.
     let gen = { clicked: true, enabled: true, how: "auto" };
-    let triggered = false;
     const busyRes = await page
       .evaluate(() => window.__renderly.generationBusy())
       .catch(() => null);
     if (busyRes && busyRes.busy) {
-      triggered = true;
       console.log("  a generation is already running — skipping trigger");
     } else {
       for (let attempt = 1; attempt <= 4; attempt++) {
         gen = await clickGenerate(page);
-        if (gen.clicked) {
-          triggered = true;
-          break;
-        }
+        if (gen.clicked) break;
         // a generation may have started on its own mid-retry - never stack
         // a duplicate on top of it
         const busyNow = await page
           .evaluate(() => window.__renderly.generationBusy())
           .catch(() => null);
-        if (busyNow && busyNow.busy) {
-          triggered = true;
-          break;
-        }
+        if (busyNow && busyNow.busy) break;
         if (attempt < 4) {
           console.log(`  submit not enabled (attempt ${attempt}) — refilling prompt…`);
           if (!(await trustedFill(page, composePrompt(opts, card)))) {
@@ -2399,68 +2558,33 @@ async function runFlowSession(page, opts, cards) {
 
     process.stdout.write("  waiting for Flow…");
     let waitedMs = 0;
-    let src = null;
     let finalBuffer = null;
-    // Ingredient-echo guard: a freshly uploaded/mounted gallery asset (a ref
-    // plate) shows up as a new flow-content URL just like a real result.
-    // A real generation comes in the motion-code canvas size, an echo in
-    // the ref file's own size - never save an echo; trigger instead.
-    const refDims = sessionRefs
-      .map((p) => ({ p, d: imageDimensions(fs.readFileSync(p)) }))
-      .filter((x) => x.d);
-    let echoCount = 0;
+    // No size test here on purpose: Flow renders a reference plate and a
+    // generated still at the same 1376x768, so "this result is the size of a
+    // reference" rejected every real generation and each card then burned its
+    // full timeout. References are kept out by the redo control and by byte
+    // ownership (seenHashes), both enforced in waitForNewImage.
     while (true) {
       const remaining = opts.timeout - waitedMs;
       if (remaining <= 0) break;
       const started = Date.now();
-      src = await waitForNewImage(page, remaining, (secs) => {
-        process.stdout.write(` ${Math.round((waitedMs + (Date.now() - started)) / 1000)}s`);
-      }, sessionSeen);
+      const result = await waitForNewImage(
+        page,
+        remaining,
+        (secs) => {
+          process.stdout.write(` ${Math.round((waitedMs + (Date.now() - started)) / 1000)}s`);
+        },
+        sessionSeen,
+        seenHashes
+      );
       waitedMs += Date.now() - started;
       console.log("");
-      if (!src) break;
-      const dataUrl = await fetchImageDataUrl(page, src).catch(() => null);
-      if (!dataUrl) { sessionSeen.add(src); src = null; continue; }
-      const { buffer } = dataUrlToBuffer(dataUrl);
-      const dims = imageDimensions(buffer);
-      const echo = dims && refDims.some((r) => r.d.w === dims.w && r.d.h === dims.h);
-      if (!echo) {
-        finalBuffer = buffer;
-        break;
-      }
-      echoCount++;
-      sessionSeen.add(src);
-      if (echoCount >= 2) {
-        console.log("  ⚠ still receiving ingredient echoes - giving up on this card");
-        break;
-      }
-      console.log(`  ⚠ ingredient echo detected (${dims.w}x${dims.h} matches a ref) - waiting for the real generation…`);
-      const busy = await page
-        .evaluate(() => window.__renderly.generationBusy())
-        .catch(() => null);
-      if (!busy || !busy.busy) {
-        if (triggered) {
-          // We already clicked Generate for this card; the echo is just the
-          // reference plate landing. Keep waiting - never stack a duplicate.
-          console.log("  echo before the generation registered — still waiting");
-        } else {
-          console.log("  no generation is running (the echo faked the trigger) - refilling the prompt and starting it now…");
-          await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
-          await sleep(1000);
-          const g2 = await clickGenerate(page);
-          if (g2.clicked) triggered = true;
-          else console.log(`  ⚠ could not start the generation after the echo (${g2.how || "no button"})`);
-          waitedMs = 0; // the real generation gets a full window
-        }
-      }
-      src = null;
+      if (!result) break;
+      finalBuffer = result.buffer;
+      break;
     }
     if (!finalBuffer) {
-      if (echoCount >= 2) {
-        throw new Error(`kept receiving ingredient echoes for "${cardLabel}"`);
-      }
-      // Forensics: what images were on the page when we gave up? If the
-      // result is there at a small size, the threshold needs adjusting.
+      // Forensics: what images were on the page when we gave up?
       const dump = await page.evaluate(() => window.__renderly.imageDump()).catch(() => []);
       const seen = dump
         .filter((d) => d.w > 0)

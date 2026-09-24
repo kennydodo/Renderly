@@ -92,6 +92,7 @@ function startRun(config, mode = "generate") {
     if ((config.reportPath || "").trim()) args.push("--report", config.reportPath.trim());
     if ((config.flowProject || "").trim()) args.push("--flow-project", config.flowProject.trim());
   } else {
+    if ((config.flowProject || "").trim()) args.push("--flow-project", config.flowProject.trim());
     if ((config.project || "").trim()) args.push("--project", config.project.trim());
     if ((config.refs || "").trim()) args.push("--refs", config.refs.trim());
     if ((config.master || "").trim()) args.push("--master", config.master.trim());
@@ -100,6 +101,8 @@ function startRun(config, mode = "generate") {
       args.push("--upscale", String(config.upscale));
     }
   }
+  // Which Google account the batch runs as (config, not code).
+  if ((config.profileDir || "").trim()) args.push("--profile", config.profileDir.trim());
 
   const child = spawn(process.execPath, [FLOW_JS, ...args], {
     cwd: DIR,
@@ -259,9 +262,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/config") {
       const body = await readBody(req);
       const config = loadConfig();
-      for (const key of ["shotlistPath", "outPath", "channel", "project", "refs", "master"]) {
+      for (const key of ["shotlistPath", "outPath", "channel", "project", "flowProject", "refs", "master"]) {
         if (typeof body[key] === "string") config[key] = body[key];
       }
+      if (typeof body.profileDir === "string") config.profileDir = body.profileDir.trim();
       if (body.upscale !== undefined) config.upscale = normalizeUpscale(body.upscale);
       saveConfig(config);
       return sendJson(res, 200, config);
@@ -309,9 +313,13 @@ const server = http.createServer(async (req, res) => {
       // project and upload refs, then write the report. Never generates.
       const body = await readBody(req);
       const config = loadConfig();
-      for (const key of ["shotlistPath", "reportPath", "flowProject"]) {
+      for (const key of ["shotlistPath", "reportPath"]) {
         if (typeof body[key] === "string" && body[key].trim()) config[key] = body[key].trim();
       }
+      // An explicit empty flowProject means "create a new project" (the stored
+      // one is dead or belongs to another account) - do not fall back to the
+      // saved config in that case.
+      if (typeof body.flowProject === "string") config.flowProject = body.flowProject.trim();
       startRun(config, "prepare");
       return sendJson(res, 200, { started: true, mode: "prepare" });
     }
