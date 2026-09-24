@@ -184,10 +184,58 @@ function promptFilled(input, prompt) {
   return value.includes(needle) || String(input.textContent || "").includes(needle);
 }
 
-function triggerGenerate(input) {
-  if (input) {
+function findGenerateButton() {
+  const buttons = deepQueryAll('button, [role="button"], input[type="submit"]').filter(
+    (b) => !isOurElement(b) && isVisible(b)
+  );
+  const label = (b) =>
+    `${b.getAttribute("aria-label") || ""} ${b.textContent || ""}`.toLowerCase();
+  // Most-specific first: a generic "Create" button must never beat the
+  // composer's real Generate control now that we actually click it.
+  const tiers = [
+    (b) => /generat|submit/.test(label(b)),
+    (b) => /render/.test(label(b)),
+    (b) => /\bsend\b/.test(label(b)),
+    (b) => /create/.test(label(b)),
+    (b) => b.getAttribute("type") === "submit",
+  ];
+  const matches = [];
+  for (const test of tiers) {
+    for (const b of buttons) {
+      if (!matches.includes(b) && test(b)) matches.push(b);
+    }
+  }
+  // Prefer an enabled match, but fall back to a disabled one so the caller can
+  // wait for it to arm instead of giving up.
+  return matches.find((b) => !b.disabled) || matches[0] || null;
+}
+
+async function triggerGenerate(input) {
+  // Flow's editor can be replaced when its state settles after a programmatic
+  // insert, so re-resolve the prompt box rather than reusing a stale node.
+  const box = getPromptInput() || input;
+  const button = findGenerateButton();
+
+  if (button) {
+    // The button arms a beat after the prompt lands. Wait for it to enable,
+    // then CLICK it for real: Flow ignores untrusted keyboard events, so
+    // dispatching Enter alone never started a generation (this used to report
+    // clicked:true without clicking anything, stalling every card).
+    if (button.disabled) await waitFor(() => !button.disabled, 3000, 150);
+    if (!button.disabled) {
+      try {
+        clickEl(button);
+        return { clicked: true, how: describeEl(button) };
+      } catch {
+        /* fall through to Enter */
+      }
+    }
+  }
+
+  // No usable button: try Enter on the live editor as a last resort.
+  if (box) {
     ["keydown", "keypress", "keyup"].forEach((type) => {
-      input.dispatchEvent(
+      box.dispatchEvent(
         new KeyboardEvent(type, {
           key: "Enter",
           code: "Enter",
@@ -198,24 +246,8 @@ function triggerGenerate(input) {
         })
       );
     });
+    return { clicked: true, how: `Enter on ${describeEl(box)}` };
   }
-
-  const buttons = deepQueryAll('button, [role="button"], input[type="submit"]').filter(
-    (b) => !isOurElement(b) && isVisible(b)
-  );
-  const byAria = buttons.find((b) => {
-    const label = (b.getAttribute("aria-label") || "").toLowerCase();
-    return /generate|submit|send|create/.test(label);
-  });
-  if (byAria && !byAria.disabled) return { clicked: true, how: describeEl(byAria) };
-
-  const byText = buttons.find(
-    (b) => /generate|create|render|send|submit/i.test(b.textContent || "") && !b.disabled
-  );
-  if (byText) return { clicked: true, how: describeEl(byText) };
-
-  const submit = buttons.find((b) => b.getAttribute("type") === "submit" && !b.disabled);
-  if (submit) return { clicked: true, how: describeEl(submit) };
 
   return { clicked: false, how: null };
 }
@@ -1631,11 +1663,11 @@ function buildDock() {
       }
 
       await sleep(500);
-      const gen = triggerGenerate(input);
+      const gen = await triggerGenerate(input);
       if (!gen.clicked) {
         await waitForContinue(
           `Card ${index + 1}: no Generate button found — press Flow's Generate yourself, ` +
-            `then click Continue.`
+            `then click Continue. (Run Diagnose if this keeps happening.)`
         );
       }
 
@@ -1801,13 +1833,12 @@ function buildDock() {
       (b) => !isOurElement(b) && isVisible(b)
     );
     const genCandidates = buttons
-      .filter(
-        (b) =>
-          /generate|submit|send|create/i.test(
-            (b.getAttribute("aria-label") || "") + (b.textContent || "")
-          ) && !b.disabled
+      .filter((b) =>
+        /generat|submit|send|create/i.test(
+          (b.getAttribute("aria-label") || "") + " " + (b.textContent || "")
+        )
       )
-      .map((b) => describeEl(b))
+      .map((b) => `${describeEl(b)}${b.disabled ? " [disabled]" : ""}`)
       .slice(0, 4);
     return {
       promptBox: describeEl(input),
