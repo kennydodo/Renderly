@@ -10,13 +10,17 @@ import tempfile
 import time
 from pathlib import Path
 
-from config import BASE_DIR, UPSCALER_EXE
+from config import (
+    BASE_DIR,
+    DEFAULT_RESOLUTION,
+    RESOLUTION_BY_LEVEL,
+    RESOLUTION_PRESETS,
+    UPSCALER_EXE,
+)
 
 # Tile size for the ncnn engine. Smaller tiles = less VRAM; large tiles on
 # small GPUs produce corrupted output (garbage from other images overlaid).
 DEFAULT_TILE = 256
-
-from config import BASE_DIR, UPSCALER_EXE
 
 DEFAULT_EXE = BASE_DIR / "tools" / "realesrgan" / "realesrgan-ncnn-vulkan.exe"
 _TOOLS_DIR = BASE_DIR / "tools" / "realesrgan"
@@ -75,12 +79,68 @@ def _image_dimensions(path: Path) -> tuple[int, int]:
 
 
 def classify_size(width: int, height: int) -> str:
-    long_side = max(width, height)
-    if long_side >= 3800:
+    """Name the resolution tier an image already sits at (by its short side)."""
+    short_side = min(width, height)
+    if short_side >= 1900:
         return "4K"
-    if long_side >= 1900:
+    if short_side >= 1260:
         return "2K"
+    if short_side >= 1000:
+        return "HD"
     return "1K"
+
+
+def target_dimensions(tier: str, width: int, height: int) -> tuple[int, int]:
+    """Exact output size for a tier, keeping the source aspect ratio.
+
+    The presets are 16:9, so a source that already matches that ratio (or its
+    portrait flip) snaps to the preset exactly; every other ratio is scaled so
+    its short side matches the preset's.
+    """
+    preset_w, preset_h = RESOLUTION_PRESETS[tier]
+    ratio = width / height
+    if abs(ratio - preset_w / preset_h) <= 0.03 * (preset_w / preset_h):
+        return preset_w, preset_h
+    if abs(ratio - preset_h / preset_w) <= 0.03 * (preset_h / preset_w):
+        return preset_h, preset_w
+    scale = min(preset_w, preset_h) / min(width, height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def level_to_tier(level) -> str | None:
+    """Map the saved upscale_level setting (0 = off) to a tier name."""
+    try:
+        return RESOLUTION_BY_LEVEL.get(int(level))
+    except (TypeError, ValueError):
+        return None
+
+
+# Tier names used before the rename to ImgToVideo's vocabulary.
+_LEGACY_TIER_NAMES = {"1K": "HD"}
+
+
+def resolve_tier(tier: str | None, scale: int | None = None) -> str:
+    """Normalize an API request to a tier name (HD / 2K / 4K).
+
+    `scale` is the legacy 2x/4x request; it maps onto the nearest tier so older
+    callers (ImgToVideo.ImageGen, WhisperRadar, the driver) keep working.
+    0 / "off" is rejected with a clear error instead of silently falling back to
+    the default tier: a caller that does not want an upscale must not call the
+    upscale endpoint at all (WhisperRadar's upscale tier 0 means off).
+    """
+    if tier in RESOLUTION_PRESETS:
+        return tier
+    if isinstance(tier, str) and tier in _LEGACY_TIER_NAMES:
+        return _LEGACY_TIER_NAMES[tier]
+    try:
+        scale_value = int(scale or 0)
+    except (TypeError, ValueError):
+        scale_value = 0
+    if scale_value <= 0:
+        raise ValueError(
+            "Upscale scale must be 2 or 4 (0 = off: skip the upscale call)."
+        )
+    return {1: "HD", 2: "2K", 3: "2K", 4: "4K"}.get(scale_value, DEFAULT_RESOLUTION)
 
 
 def _load_cache() -> dict:
@@ -231,35 +291,37 @@ def _cached_gpu(exe: Path) -> int | None:
     return int(device)
 
 
-def _pillow_upscale(src: Path, dst: Path, scale: int) -> tuple[int, int]:
+def _resize(src: Path, dst: Path, size: tuple[int, int]) -> tuple[int, int]:
     from PIL import Image
 
     with Image.open(src) as img:
-        result = img.convert("RGB").resize(
-            (img.width * scale, img.height * scale), Image.LANCZOS
-        )
+        result = img.convert("RGB").resize(size, Image.LANCZOS)
         dst.parent.mkdir(parents=True, exist_ok=True)
         result.save(dst, "PNG")
     return png_dimensions(dst)
 
 
-def upscale(src: Path, dst: Path, scale: int) -> tuple[int, int]:
-    """Upscale src -> dst (PNG): NVIDIA GPU preferred, then any Vulkan GPU, then CPU.
+def upscale(src: Path, dst: Path, tier: str) -> tuple[int, int]:
+    """Upscale src -> dst (PNG) to a resolution tier: HD (1920x1080),
+    2K (2560x1440) or 4K (3840x2160) at 16:9, scaled to the source ratio.
 
-    The engine always runs at its native 4x (the -s 2 path produces corrupt
-    tiles on this setup); a 2x request downscales the 4x result with Lanczos.
+    NVIDIA GPU preferred, then any Vulkan GPU, then CPU. The engine always runs
+    at its native 4x (the -s 2 path produces corrupt tiles on this setup); the
+    result is then Lanczos-resized to the exact target size.
     """
     exe = exe_path()
     if not exe.exists():
         raise RuntimeError(_NOT_INSTALLED)
-    scale = int(scale)
-    if scale not in (2, 4):
-        raise ValueError("Scale must be 2 or 4")
-    width, height = _image_dimensions(src)
-    if classify_size(width, height) == "4K":
-        raise ValueError("Source is already 4K resolution")
+    if tier not in RESOLUTION_PRESETS:
+        raise ValueError(f"Unknown resolution tier '{tier}' - use HD, 2K or 4K")
 
+    width, height = _image_dimensions(src)
+    target_w, target_h = target_dimensions(tier, width, height)
     dst.parent.mkdir(parents=True, exist_ok=True)
+
+    # Already at or above the target - a plain Lanczos resize is enough.
+    if width >= target_w and height >= target_h:
+        return _resize(src, dst, (target_w, target_h))
 
     with tempfile.TemporaryDirectory(prefix="renderly_upscale_") as tmp:
         flat = _flatten_to_rgb(src, Path(tmp))
@@ -288,16 +350,7 @@ def upscale(src: Path, dst: Path, scale: int) -> tuple[int, int]:
                             pass
                     continue
 
-                from PIL import Image
-
-                with Image.open(out_tmp) as img:
-                    if scale == 4:
-                        img.convert("RGB").save(dst, "PNG")
-                    else:
-                        down = img.convert("RGB").resize(
-                            (img.width // 2, img.height // 2), Image.LANCZOS
-                        )
-                        down.save(dst, "PNG")
+                dims = _resize(out_tmp, dst, (target_w, target_h))
                 if candidate is not None:
                     cache = _load_cache()
                     if cache.get("device") != candidate:
@@ -309,7 +362,7 @@ def upscale(src: Path, dst: Path, scale: int) -> tuple[int, int]:
                                 "ts": time.time(),
                             }
                         )
-                return png_dimensions(dst)
+                return dims
             except ValueError:
                 raise
             except Exception:
@@ -321,13 +374,13 @@ def upscale(src: Path, dst: Path, scale: int) -> tuple[int, int]:
                     pass
 
     # No working GPU - CPU fallback
-    dims = _pillow_upscale(src, dst, scale)
+    dims = _resize(src, dst, (target_w, target_h))
     _save_cache({"device": "cpu", "name": "Pillow Lanczos (CPU)", "kind": "cpu", "ts": time.time()})
     return dims
 
 
-def engine_label(scale: int) -> str:
+def engine_label(tier: str) -> str:
     cache = _load_cache()
     if cache.get("kind") == "cpu":
-        return f"lanczos (cpu, {scale}x)"
-    return f"realesrgan-x4 ({cache.get('name', 'GPU')}, {scale}x)"
+        return f"lanczos (cpu, {tier})"
+    return f"realesrgan-x4 ({cache.get('name', 'GPU')}, {tier})"

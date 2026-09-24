@@ -65,7 +65,7 @@ export default function BatchGenerateForm({
   const [pickerRow, setPickerRow] = useState(null);
   const [aspect, setAspect] = useState("16:9");
   const [strength, setStrength] = useState("balanced");
-  const [upscale, setUpscale] = useState(4);
+  const [upscale, setUpscale] = useState(3);
   const [parallel, setParallel] = useState(false);
   const masterRef = useRef(null);
 

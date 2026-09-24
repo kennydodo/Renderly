@@ -51,7 +51,14 @@ export default function ImageCard({
     .replace(/\.(png|jpe?g|webp)$/i, "")
     .replace(/\s*\(\d+x\)\s*/i, "")
     .trim()}.png`;
-  const sizeLabel = { "1K": "720p", "2K": "1080p", "4K": "4K" }[generation.image_size] || generation.image_size;
+  // 16:9 preset sizes; other ratios are scaled by the short side.
+  const sizeLabel =
+    {
+      "1K": "1K native",
+      HD: "HD 1920×1080",
+      "2K": "2K 2560×1440",
+      "4K": "4K 3840×2160",
+    }[generation.image_size] || generation.image_size;
 
   const commitRename = () => {
     setEditing(false);

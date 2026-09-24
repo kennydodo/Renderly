@@ -85,13 +85,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ channel_id: channelId }),
     }),
-  upscaleGeneration: (id, scale = 2) =>
+  upscaleGeneration: (id, tier = "2K") =>
     request(`/api/generations/${id}/upscale`, {
       method: "POST",
-      body: JSON.stringify({ scale }),
+      body: JSON.stringify({ tier }),
     }),
-  upscaleAsset: (id, scale = 2) =>
-    request(`/api/assets/${id}/upscale`, { method: "POST", body: JSON.stringify({ scale }) }),
+  upscaleAsset: (id, tier = "2K") =>
+    request(`/api/assets/${id}/upscale`, { method: "POST", body: JSON.stringify({ tier }) }),
   upscaleStatus: () => request("/api/upscale/status"),
   getSettings: () => request("/api/settings"),
   updateSettings: (patch) =>

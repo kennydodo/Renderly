@@ -126,7 +126,7 @@ export default function Settings() {
         <div className="card" style={{ maxWidth: "720px", marginBottom: "18px" }}>
           <h2>Generation defaults</h2>
           <div className="form-row" style={{ alignItems: "center" }}>
-            <label style={{ minWidth: "140px" }}>Upscale level</label>
+            <label style={{ minWidth: "140px" }}>Resolution</label>
             <select
               value={genSettings.upscale_level}
               onChange={(e) =>
@@ -134,8 +134,9 @@ export default function Settings() {
               }
             >
               <option value={0}>Off — keep native size</option>
-              <option value={2}>2× upscaled automatically</option>
-              <option value={4}>4× upscaled automatically</option>
+              <option value={1}>1920 × 1080 (HD)</option>
+              <option value={2}>2560 × 1440 (2K)</option>
+              <option value={3}>3840 × 2160 (4K)</option>
             </select>
           </div>
           <div className="form-row" style={{ alignItems: "center" }}>

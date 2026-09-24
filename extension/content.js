@@ -557,16 +557,32 @@ function safeFileName(name) {
   return cleaned || "image";
 }
 
-// Persisted upscale factor for the auto-upscale step (2× default, 3×/4× optional).
-async function getUpscaleScale() {
+// Output resolution tiers for the auto-upscale step (Renderly's local GPU
+// upscale targets, named like ImgToVideo's render presets).
+const UPSCALE_TIERS = ["HD", "2K", "4K"];
+const UPSCALE_TIER_LABELS = {
+  HD: "1920 × 1080 (HD)",
+  "2K": "2560 × 1440 (2K)",
+  "4K": "3840 × 2160 (4K)",
+};
+
+async function getUpscaleTier() {
   try {
-    const { upscaleScale } = await chrome.storage.local.get("upscaleScale");
-    const n = Number(upscaleScale);
-    if (n >= 2 && n <= 4) return n;
+    const { upscaleTier, upscaleScale } = await chrome.storage.local.get([
+      "upscaleTier",
+      "upscaleScale",
+    ]);
+    if (UPSCALE_TIERS.includes(upscaleTier)) return upscaleTier;
+    if (upscaleTier === "1K") return "HD"; // pre-rename tier name
+    // Legacy 2×/4× value: 4× was the old 4K, 2×/3× map onto 2K, 1× onto HD.
+    const legacy = Number(upscaleScale);
+    if (legacy === 4) return "4K";
+    if (legacy === 2 || legacy === 3) return "2K";
+    if (legacy === 1) return "HD";
   } catch {
     /* fall through to default */
   }
-  return 2;
+  return "2K";
 }
 
 // How many versions each card generates (1-4).
@@ -1059,7 +1075,7 @@ function buildDock() {
   autoUpscaleCheck.checked = true;
   autoUpscaleLabel.appendChild(autoUpscaleCheck);
   const autoUpscaleText = document.createElement("span");
-  autoUpscaleText.textContent = "Auto-upscale 2× + download each result (local GPU)";
+  autoUpscaleText.textContent = "Auto-upscale to 2560 × 1440 (2K) + download each result (local GPU)";
   autoUpscaleLabel.appendChild(autoUpscaleText);
 
   const generateBtn = document.createElement("button");
@@ -1650,7 +1666,7 @@ function buildDock() {
           const up = await backendJson(`/api/generations/${genRecord.id}/upscale`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ scale: await getUpscaleScale() }),
+            body: JSON.stringify({ tier: await getUpscaleTier() }),
           });
           label = `${up.name} (${up.image_size})`;
           runCostUsd += up.cost_usd || 0;
@@ -1866,21 +1882,20 @@ function buildDock() {
 
   const scaleSelect = document.createElement("select");
   scaleSelect.style.cssText = selectStyle;
-  ["2", "3", "4"].forEach((s) => {
+  UPSCALE_TIERS.forEach((tier) => {
     const opt = document.createElement("option");
-    opt.value = s;
-    opt.textContent = `${s}×`;
+    opt.value = tier;
+    opt.textContent = UPSCALE_TIER_LABELS[tier];
     scaleSelect.appendChild(opt);
   });
   scaleSelect.onchange = async () => {
-    await chrome.storage.local.set({ upscaleScale: Number(scaleSelect.value) });
-    autoUpscaleText.textContent = `Auto-upscale ${scaleSelect.value}× + download each result (local GPU)`;
-    setStatus(`Upscale target set to ${scaleSelect.value}×.`);
+    await chrome.storage.local.set({ upscaleTier: scaleSelect.value });
+    autoUpscaleText.textContent = `Auto-upscale to ${UPSCALE_TIER_LABELS[scaleSelect.value]} + download each result (local GPU)`;
+    setStatus(`Resolution set to ${UPSCALE_TIER_LABELS[scaleSelect.value]}.`);
   };
-  chrome.storage.local.get("upscaleScale").then(({ upscaleScale }) => {
-    const s = Number(upscaleScale) || 2;
-    scaleSelect.value = String(s);
-    autoUpscaleText.textContent = `Auto-upscale ${s}× + download each result (local GPU)`;
+  getUpscaleTier().then((tier) => {
+    scaleSelect.value = tier;
+    autoUpscaleText.textContent = `Auto-upscale to ${UPSCALE_TIER_LABELS[tier]} + download each result (local GPU)`;
   });
   const versionsSelect = document.createElement("select");
   versionsSelect.style.cssText = selectStyle;
@@ -1899,7 +1914,7 @@ function buildDock() {
   });
   const versionsSetting = buildSettingItem("Versions per card", versionsSelect);
 
-  const scaleSetting = buildSettingItem("Auto-upscale target", scaleSelect);
+  const scaleSetting = buildSettingItem("Resolution", scaleSelect);
 
   const retrySelect = document.createElement("select");
   retrySelect.style.cssText = selectStyle;

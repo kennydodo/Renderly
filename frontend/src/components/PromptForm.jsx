@@ -13,7 +13,7 @@ export default function PromptForm({
   const [prompt, setPrompt] = useState("");
   const [aspect, setAspect] = useState("16:9");
   const [strength, setStrength] = useState("balanced");
-  const [upscale, setUpscale] = useState(4);
+  const [upscale, setUpscale] = useState(3);
 
   const handleSubmit = (event) => {
     event.preventDefault();

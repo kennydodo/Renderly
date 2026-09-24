@@ -30,11 +30,24 @@ const FLOW_URL = "https://flow.google.com/";
 
 /* ================= CLI ================= */
 
+// Renderly output resolution tiers; legacy 2x/4x multipliers still accepted.
+function normalizeUpscaleTier(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text || text === "off" || text === "0") return "off";
+  if (text === "1k") return "HD"; // pre-rename tier name
+  if (["hd", "2k", "4k"].includes(text)) return text.toUpperCase();
+  const n = Number(text);
+  if (n === 4) return "4K";
+  if (n === 2 || n === 3) return "2K";
+  if (n === 1) return "HD";
+  return "off";
+}
+
 function parseArgs(argv) {
   const opts = {
     backend: DEFAULT_BACKEND,
     versions: 1,
-    upscale: 2, // 0 = off
+    upscale: "2K", // "off" | "HD" | "2K" | "4K"
     out: OUTPUT_DIR,
     refs: [],
     timeout: 240000,
@@ -55,7 +68,7 @@ function parseArgs(argv) {
         .map((s) => path.resolve(s.trim()))
         .filter(Boolean);
     else if (a === "--versions") opts.versions = Number(next()) || 1;
-    else if (a === "--upscale") opts.upscale = Number(next()) || 0;
+    else if (a === "--upscale") opts.upscale = normalizeUpscaleTier(next());
     else if (a === "--out") opts.out = path.resolve(next());
     else if (a === "--timeout") opts.timeout = Number(next()) || opts.timeout;
     else if (a === "--diag") opts.diag = true;
@@ -84,7 +97,7 @@ Options:
   --project <id/name> Renderly project inside the channel — imports land there
   --refs <a,b,...>   Global reference images (attached once, persist for every card)
   --versions <1-4>   Generations per card (default 1)
-  --upscale <0-4>    Renderly GPU upscale factor after import; 0 disables (default 2)
+  --upscale <off|HD|2K|4K>  Renderly GPU upscale after import; off disables (default 2K)
   --backend <url>    Renderly backend (default ${DEFAULT_BACKEND})
   --out <dir>        Local download folder (default ./output)
   --timeout <ms>     Per-generation wait limit (default 240000)
@@ -1015,11 +1028,11 @@ async function importToRenderly(backend, channelId, filePath, name, prompt, proj
   return res.json();
 }
 
-async function upscaleGeneration(backend, id, scale) {
+async function upscaleGeneration(backend, id, tier) {
   const res = await fetch(`${backend}/api/generations/${id}/upscale`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scale }),
+    body: JSON.stringify({ tier }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -1748,7 +1761,7 @@ async function main() {
           opts.projectId
         );
         console.log(`✓ ${record.name} imported`);
-        if (opts.upscale > 0) {
+        if (opts.upscale && opts.upscale !== "off") {
           try {
             const up = await upscaleGeneration(opts.backend, record.id, opts.upscale);
             // Replace in place: the upscaled image keeps the exact original
@@ -2188,7 +2201,7 @@ async function runFlowSession(page, opts, cards) {
       costUsd += record.cost_usd || 0;
       console.log(`  imported to Renderly as "${record.name}"`);
 
-      if (opts.upscale > 0) {
+      if (opts.upscale && opts.upscale !== "off") {
         try {
           const up = await upscaleGeneration(opts.backend, record.id, opts.upscale);
           costUsd += up.cost_usd || 0;

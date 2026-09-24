@@ -299,14 +299,17 @@ export default function FlowDriver() {
 
           <div style={{ height: "10px" }} />
 
-          {label("Upscale factor (0 = off)")}
-          <input
-            type="number"
-            min="0"
-            max="4"
-            value={config.upscale ?? 2}
-            onChange={(e) => setConfig({ ...config, upscale: Number(e.target.value) })}
-          />
+          {label("Resolution (Renderly GPU upscale after import)")}
+          <select
+            value={config.upscale || "off"}
+            onChange={(e) => setConfig({ ...config, upscale: e.target.value })}
+            style={{ width: "100%" }}
+          >
+            <option value="off">Off — keep native size</option>
+            <option value="HD">1920 × 1080 (HD)</option>
+            <option value="2K">2560 × 1440 (2K)</option>
+            <option value="4K">3840 × 2160 (4K)</option>
+          </select>
 
           <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
             <button onClick={saveConfig} disabled={busy}>

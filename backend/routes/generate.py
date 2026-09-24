@@ -31,6 +31,7 @@ router = APIRouter(prefix="/api", tags=["generate"])
 AspectRatio = Literal["1:1", "16:9", "9:16", "4:3", "3:4"]
 RefStrength = Literal["loose", "balanced", "strict"]
 ImageSize = Literal["1K", "2K", "4K"]
+ResolutionTier = Literal["HD", "2K", "4K"]
 
 NAME_TOKEN_RE = re.compile(r"^\s*([\w\-]+\.(?:png|jpe?g))\s+(.*)$", re.IGNORECASE | re.DOTALL)
 
@@ -132,7 +133,8 @@ class SaveAsAssetRequest(BaseModel):
 
 
 class UpscaleRequest(BaseModel):
-    scale: int = Field(default=2)
+    tier: ResolutionTier | None = None
+    scale: int | None = None  # legacy 2x/4x request, mapped onto the nearest tier
 
 
 class GenerationOut(BaseModel):
@@ -319,7 +321,7 @@ def _auto_post_process(generation_id: int, level_override: int | None = None) ->
     import shutil
 
     from db import SessionLocal
-    from routes.settings import auto_process_settings
+    from routes.settings import auto_process_settings, normalize_level
 
     db = SessionLocal()
     try:
@@ -327,11 +329,11 @@ def _auto_post_process(generation_id: int, level_override: int | None = None) ->
         if generation is None or generation.status != "done" or not generation.image_url:
             return
         settings_level, auto_download, download_dir = auto_process_settings(db)
-        level = settings_level if level_override is None else level_override
-        level = max(0, min(4, int(level)))
-        if level > 0 and upscaler.is_available():
+        level = settings_level if level_override is None else normalize_level(level_override)
+        tier = upscaler.level_to_tier(level)
+        if tier and upscaler.is_available():
             try:
-                _upscale_in_place(db, generation, level)
+                _upscale_in_place(db, generation, tier)
             except Exception as exc:
                 print(f"[auto-upscale] generation {generation_id}: {exc}")
         if not auto_download or not download_dir:
@@ -711,14 +713,14 @@ def generation_thumb(generation_id: int, db: Session = Depends(get_db)):
     return FileResponse(thumb, media_type="image/png")
 
 
-def _upscale_in_place(db: Session, source: Generation, scale: int) -> Generation:
+def _upscale_in_place(db: Session, source: Generation, tier: str) -> Generation:
     """Upscale the generation's image and update the SAME record — the
     gallery keeps one entry, one file, and the ORIGINAL name (no 2x/4x
     suffixes). A query marker on image_url busts the browser cache."""
     src_path = _generation_file(source)
     tmp_path = src_path.with_name(f"tmp_upscale_{uuid.uuid4().hex}.png")
     try:
-        width, height = upscaler.upscale(src_path, tmp_path, scale)
+        width, height = upscaler.upscale(src_path, tmp_path, tier)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -748,7 +750,7 @@ def upscale_generation(
     if source.status != "done" or not source.image_url:
         raise HTTPException(status_code=400, detail="Generation has no image to upscale")
     try:
-        return _upscale_in_place(db, source, body.scale)
+        return _upscale_in_place(db, source, upscaler.resolve_tier(body.tier, body.scale))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:

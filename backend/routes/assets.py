@@ -2,10 +2,11 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -31,7 +32,8 @@ class AssetOut(BaseModel):
 
 
 class AssetUpscaleRequest(BaseModel):
-    scale: int = Field(default=2)
+    tier: Literal["HD", "2K", "4K"] | None = None
+    scale: int | None = None  # legacy 2x/4x request, mapped onto the nearest tier
 
 
 def channel_dir(channel_id: int) -> Path:
@@ -124,8 +126,9 @@ def upscale_asset(asset_id: int, body: AssetUpscaleRequest, db: Session = Depend
     src = asset_path(asset)
     out_name = f"{uuid.uuid4().hex}.png"
     out_path = channel_dir(asset.channel_id) / out_name
+    tier = upscaler.resolve_tier(body.tier, body.scale)
     try:
-        upscaler.upscale(src, out_path, body.scale)
+        upscaler.upscale(src, out_path, tier)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except ValueError as exc:
@@ -136,7 +139,7 @@ def upscale_asset(asset_id: int, body: AssetUpscaleRequest, db: Session = Depend
     stem = Path(asset.original_name).stem or f"asset-{asset.id}"
     upscaled = Asset(
         channel_id=asset.channel_id,
-        original_name=f"{stem} ({body.scale}x).png",
+        original_name=f"{stem} ({tier}).png",
         stored_name=out_name,
         url_path=f"/storage/{asset.channel_id}/{out_name}",
         mime_type="image/png",

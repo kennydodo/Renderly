@@ -46,7 +46,7 @@ download. Multi-card batches should use the **same refs on every card**
 (ingredients persist in the composer across cards within a run).
 
 Options (see `node flow.js --help`): `--channel <id>` (import into Renderly
-via `POST /api/channels/{id}/import`), `--upscale <0-4>`, `--versions <1-4>`,
+via `POST /api/channels/{id}/import`), `--upscale <off|HD|2K|4K>`, `--versions <1-4>`,
 `--refs`, `--backend`, `--out`, `--timeout`, `--browser`, `--diag`.
 
 ## Notes

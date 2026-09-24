@@ -27,6 +27,19 @@ IMAGE_PRICE_USD = {
     "4K": float(os.getenv("GEMINI_IMAGE_PRICE_4K_USD", "0.156")),
 }
 
+# Output resolution presets for the local upscale step. The names and 16:9
+# sizes match ImgToVideo's render presets (HD / 2K / 4K); other aspect ratios
+# scale by their short side so the ratio is preserved.
+RESOLUTION_PRESETS = {
+    "HD": (1920, 1080),
+    "2K": (2560, 1440),
+    "4K": (3840, 2160),
+}
+DEFAULT_RESOLUTION = "2K"
+# The saved upscale_level setting: 0 = off (native 1K), 1 = HD, 2 = 2K, 3 = 4K.
+RESOLUTION_BY_LEVEL = {1: "HD", 2: "2K", 3: "4K"}
+MAX_UPSCALE_LEVEL = 3
+
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{(BASE_DIR / 'renderly.db').as_posix()}")
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB

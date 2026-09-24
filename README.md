@@ -96,7 +96,7 @@ Images are served at `/storage/{channel_id}/{filename}.png`.
 - **Quota/billing limit:** when Google returns `429 RESOURCE_EXHAUSTED` (or a billing/403 refusal), generation stops immediately — the rest of a batch is marked *Skipped* and nothing further is sent. Failed and skipped images can be retried manually once the limit resets.
 - The image model defaults to `gemini-3.1-flash-image` (nano banana 2); override with `GEMINI_IMAGE_MODEL` in `.env`.
 - Aspect ratios: `1:1`, `16:9` (default), `9:16`, `4:3`, `3:4`.
-- Resolutions: `1K` (default, 1376×768 at 16:9), `2K` (2752×1536), `4K` (5504×3072).
+- Resolutions: generation always asks Gemini for native 1K, then upscales locally to the chosen preset — `HD` (1920×1080), `2K` (2560×1440), `4K` (3840×2160) at 16:9; other aspect ratios scale by their short side. `Off` keeps the native size. The preset names match ImgToVideo's render presets.
 - Reference adherence presets: **Balanced** (default, no extra instruction), **Loose** (refs are loose inspiration), **Strict** (reproduce refs as faithfully as possible).
 - Batches have **no item limit** — add as many prompts as you like. They run sequentially by default; tick **Parallel** to run up to 4 prompts concurrently (faster, uses quota faster too).
 - New generations are auto-named from the first words of the prompt; click the name in a gallery card to rename.

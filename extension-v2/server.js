@@ -33,15 +33,34 @@ const DEFAULT_CONFIG = {
     path.join(DIR, "refs", "CHAR HUMAN MAKE.webp"),
   ].join(","),
   master: "",
-  upscale: 2,
+  upscale: "2K",
 };
+
+// Renderly output resolution tiers; legacy 2x/4x multipliers still accepted
+// (WhisperRadar sends its 0-4 tier here).
+function normalizeUpscale(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text || text === "off" || text === "0") return "off";
+  if (text === "1k") return "HD"; // pre-rename tier name
+  if (["hd", "2k", "4k"].includes(text)) return text.toUpperCase();
+  const n = Number(text);
+  if (n === 4) return "4K";
+  if (n === 2 || n === 3) return "2K";
+  if (n === 1) return "HD";
+  return "off";
+}
 
 const DIALOGS = path.join(DIR, "dialogs");
 const BACKEND = "http://127.0.0.1:8022";
 
 function loadConfig() {
   try {
-    return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")) };
+    const saved = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    return {
+      ...DEFAULT_CONFIG,
+      ...saved,
+      upscale: normalizeUpscale(saved.upscale ?? DEFAULT_CONFIG.upscale),
+    };
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -232,7 +251,7 @@ const server = http.createServer(async (req, res) => {
       for (const key of ["shotlistPath", "outPath", "channel", "project", "refs", "master"]) {
         if (typeof body[key] === "string") config[key] = body[key];
       }
-      if (body.upscale !== undefined) config.upscale = Number(body.upscale) || 0;
+      if (body.upscale !== undefined) config.upscale = normalizeUpscale(body.upscale);
       saveConfig(config);
       return sendJson(res, 200, config);
     }
