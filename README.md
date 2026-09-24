@@ -101,3 +101,7 @@ Images are served at `/storage/{channel_id}/{filename}.png`.
 - Batches have **no item limit** — add as many prompts as you like. They run sequentially by default; tick **Parallel** to run up to 4 prompts concurrently (faster, uses quota faster too).
 - New generations are auto-named from the first words of the prompt; click the name in a gallery card to rename.
 - One-click launch: run `start.bat` (double-click) to open backend + frontend in their own windows; `stop.bat` shuts them down.
+
+## Tests
+
+Run `test.bat` — it executes the whole suite (extension + driver + backend) and exits non-zero on any failure. A `pre-commit` hook runs it before every commit; bypass a single commit with `git commit --no-verify`. See `tests/README.md` for what is covered.
