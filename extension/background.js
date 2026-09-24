@@ -22,6 +22,83 @@ function blobToDataUrl(blob) {
   });
 }
 
+/* ================= trusted input (DevTools protocol) ================= */
+
+// Flow's Angular composer ignores programmatic edits: the text lands in the DOM
+// but the submit arrow never arms, so a synthetic click has nothing to fire.
+// Replaying the fill + click over the DevTools protocol produces the trusted
+// input Flow actually listens for.
+const debuggerTabs = new Set();
+
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function cdp(tabId, method, params) {
+  return chrome.debugger.sendCommand({ tabId }, method, params);
+}
+
+async function attachDebugger(tabId) {
+  if (debuggerTabs.has(tabId)) return;
+  await chrome.debugger.attach({ tabId }, "1.3");
+  debuggerTabs.add(tabId);
+}
+
+async function detachDebugger(tabId) {
+  if (!debuggerTabs.has(tabId)) return;
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {
+    /* tab or session already gone */
+  }
+  debuggerTabs.delete(tabId);
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => debuggerTabs.delete(tabId));
+chrome.debugger.onDetach.addListener((source) => {
+  if (source && source.tabId !== undefined) debuggerTabs.delete(source.tabId);
+});
+
+async function trustedFill(tabId, msg) {
+  await attachDebugger(tabId);
+  await clickPoint(tabId, msg.composer);
+  await pause(150);
+  // Clear whatever the synthetic fill left behind, then type it properly.
+  await pressKey(tabId, "keyDown", "a", "KeyA", 65, 2);
+  await pressKey(tabId, "keyUp", "a", "KeyA", 65, 2);
+  await pressKey(tabId, "keyDown", "Delete", "Delete", 46);
+  await pressKey(tabId, "keyUp", "Delete", "Delete", 46);
+  await pause(100);
+  await cdp(tabId, "Input.insertText", { text: msg.text });
+  return { ok: true };
+}
+
+async function trustedClick(tabId, msg) {
+  await attachDebugger(tabId);
+  await clickPoint(tabId, msg.button);
+  return { ok: true, clicked: true };
+}
+
+async function clickPoint(tabId, point) {
+  const params = {
+    x: Math.round(point.x),
+    y: Math.round(point.y),
+    button: "left",
+    clickCount: 1,
+  };
+  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", ...params });
+  await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", ...params });
+}
+
+function pressKey(tabId, type, keyName, code, vk, modifiers = 0) {
+  return cdp(tabId, "Input.dispatchKeyEvent", {
+    type,
+    modifiers,
+    key: keyName,
+    code,
+    windowsVirtualKeyCode: vk,
+    nativeVirtualKeyCode: vk,
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
@@ -96,6 +173,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           body: form,
         });
         sendResponse({ ok: res.ok, status: res.status, data: await readJson(res) });
+        return;
+      }
+
+      if (msg.type === "trustedFill") {
+        const tab = sender && sender.tab;
+        if (!tab || tab.id === undefined) {
+          sendResponse({ ok: false, error: "No tab for trusted input" });
+          return;
+        }
+        sendResponse(await trustedFill(tab.id, msg));
+        return;
+      }
+
+      if (msg.type === "trustedClick") {
+        const tab = sender && sender.tab;
+        if (!tab || tab.id === undefined) {
+          sendResponse({ ok: false, error: "No tab for trusted input" });
+          return;
+        }
+        sendResponse(await trustedClick(tab.id, msg));
+        return;
+      }
+
+      if (msg.type === "detachDebugger") {
+        const tab = sender && sender.tab;
+        if (tab && tab.id !== undefined) await detachDebugger(tab.id);
+        sendResponse({ ok: true });
         return;
       }
 

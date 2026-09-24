@@ -27,3 +27,4 @@ Manifest V3 extension that bridges **Google Flow** (labs.google/fx) and your loc
 
 - Flow is an SPA; the dock injects via a debounced MutationObserver and re-uses the last `≥512px` image on the page as "last generated image".
 - API calls go through the background service worker (avoids page-CORS issues). Uploads reuse Renderly's normal `POST /api/channels/{id}/assets` endpoint, so files land in `backend/storage/{channel_id}/` like any upload.
+- Flow's composer is an Angular/ProseMirror editor that ignores programmatic edits: the prompt can be made to *appear* without its model ever registering it, which leaves the submit arrow disabled and nothing sent. When the synthetic fill fails to arm the arrow, the extension falls back to replaying the fill and the click as trusted input over the DevTools protocol (the `debugger` permission). Chrome shows a "being debugged" bar while that is in use; it detaches when the batch ends.

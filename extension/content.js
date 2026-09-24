@@ -1,5 +1,6 @@
 const DOCK_ID = "renderly-dock";
-const DOCK_VERSION = "1.13.1";
+// Read from the manifest so the dock can never claim a stale version again.
+const DOCK_VERSION = chrome.runtime.getManifest().version;
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 
 const PRESETS = [
@@ -252,6 +253,74 @@ async function triggerGenerate(input) {
   return { clicked: false, how: null };
 }
 
+// Flow's Angular composer ignores programmatic edits — the text shows up in the
+// DOM but the submit arrow never arms, so there is nothing for a synthetic
+// click to fire. Replay the fill (and the click) as trusted input over the
+// DevTools protocol, the same approach the extension-v2 driver uses.
+function setOurUiHidden(hidden) {
+  // Keep layout intact (visibility, not display) so Flow doesn't reflow, but
+  // take the dock out of hit-testing — a trusted click must not land on us.
+  [DOCK_ID, `${DOCK_ID}-settings`, `${DOCK_ID}-ref-toast`].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.style.visibility = hidden ? "hidden" : "";
+  });
+}
+
+// Viewport coordinates for CDP input. An element inside a same-origin iframe
+// reports rects relative to that frame, so add each frame's offset on the way up.
+function topLevelPoint(el) {
+  try {
+    el.scrollIntoView({ block: "center" });
+  } catch {
+    /* ignore */
+  }
+  let rect = el.getBoundingClientRect();
+  let win = el.ownerDocument && el.ownerDocument.defaultView;
+  while (win && win !== window) {
+    const frame = win.frameElement;
+    if (!frame) break;
+    const frameRect = frame.getBoundingClientRect();
+    rect = {
+      left: rect.left + frameRect.left,
+      top: rect.top + frameRect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    win = frame.ownerDocument && frame.ownerDocument.defaultView;
+  }
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+}
+
+async function trustedFill(text) {
+  const composer = getPromptInput();
+  if (!composer) return { ok: false, error: "no composer found" };
+  setOurUiHidden(true);
+  try {
+    return await sendToBackground({
+      type: "trustedFill",
+      text,
+      composer: topLevelPoint(composer),
+    });
+  } catch (err) {
+    return { ok: false, error: err.message };
+  } finally {
+    setOurUiHidden(false);
+  }
+}
+
+async function trustedClick() {
+  const button = findGenerateButton();
+  if (!button) return { ok: false, error: "no generate button" };
+  setOurUiHidden(true);
+  try {
+    return await sendToBackground({ type: "trustedClick", button: topLevelPoint(button) });
+  } catch (err) {
+    return { ok: false, error: err.message };
+  } finally {
+    setOurUiHidden(false);
+  }
+}
+
 function captureImageSet() {
   const set = new Set();
   deepQueryAll("img").forEach((img) => {
@@ -270,8 +339,40 @@ function scanForImages() {
 
 function clickEl(el) {
   el.scrollIntoView({ block: "center" });
-  el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-  el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  try {
+    el.focus({ preventScroll: true });
+  } catch {
+    /* not focusable — ignore */
+  }
+  const opts = { bubbles: true, cancelable: true, view: window };
+  // A full pointer sequence, not just click(): Flow's controls arm on
+  // pointerdown/mousedown, and a bare .click() can leave them un-armed.
+  if (window.PointerEvent) {
+    [
+      ["pointerover", 0],
+      ["pointerenter", 0],
+      ["pointermove", 0],
+      ["pointerdown", 1],
+      ["pointerup", 0],
+    ].forEach(([type, buttons]) => {
+      try {
+        el.dispatchEvent(
+          new PointerEvent(type, {
+            ...opts,
+            pointerId: 1,
+            pointerType: "mouse",
+            isPrimary: true,
+            button: 0,
+            buttons,
+          })
+        );
+      } catch {
+        /* PointerEvent not constructible — skip */
+      }
+    });
+  }
+  el.dispatchEvent(new MouseEvent("mousedown", opts));
+  el.dispatchEvent(new MouseEvent("mouseup", opts));
   el.click();
 }
 
@@ -1592,45 +1693,67 @@ function buildDock() {
           /* ignore */
         }
       }
-      const fillOnce = () => setPromptText(getPromptInput() || input, prompt);
-      let filled = fillOnce();
-      if (!filled) {
-        // One retry after a short pause — focus/DOM can settle late.
-        await sleep(400);
-        filled = fillOnce();
+
+      // Flow's Angular composer ignores the synthetic fill, so trusted input
+      // goes first; the synthetic ladder below is the fallback for when the
+      // debugger is unavailable (DevTools open, permission missing, ...).
+      setCardStatus(card.id, "Filling prompt (trusted input)…");
+      const trusted = await trustedFill(prompt);
+      let filled = false;
+      if (trusted.ok) {
+        filled = await waitFor(
+          () => promptFilled(getPromptInput() || input, prompt),
+          4000,
+          200
+        );
       }
       if (!filled) {
-        // Editor state can settle asynchronously — re-check before giving up.
-        await sleep(600);
-        filled = promptFilled(getPromptInput() || input, prompt);
-      }
-      if (!filled && focusFlow !== true) {
-        setCardStatus(card.id, "Retrying with window focus…");
-        try {
-          await sendToBackground({ type: "focusPage" });
-        } catch {
-          /* ignore */
+        if (!trusted.ok) {
+          setCardStatus(
+            card.id,
+            `Trusted input unavailable (${trusted.error}) — using synthetic fill…`
+          );
         }
-        await sleep(300);
+        const fillOnce = () => setPromptText(getPromptInput() || input, prompt);
         filled = fillOnce();
         if (!filled) {
+          // One retry after a short pause — focus/DOM can settle late.
           await sleep(400);
+          filled = fillOnce();
+        }
+        if (!filled) {
+          // Editor state can settle asynchronously — re-check before giving up.
+          await sleep(600);
           filled = promptFilled(getPromptInput() || input, prompt);
         }
-      }
-      if (!filled) {
-        const { pasteDialog } = await chrome.storage.local.get("pasteDialog");
-        if (pasteDialog === true) {
-          const copied = await copyTextToClipboard(prompt);
-          await waitForContinue(
-            `Card ${index + 1}: Flow blocked insertion. ` +
-              (copied
-                ? "The prompt is on your clipboard — paste it (Ctrl+V) in Flow's box, "
-                : "Copy the prompt manually and paste it in Flow's box, ") +
-              `then click Continue.`
-          );
-        } else {
-          setCardStatus(card.id, "⚠ Auto-fill failed — Flow may reuse its previous prompt");
+        if (!filled && focusFlow !== true) {
+          setCardStatus(card.id, "Retrying with window focus…");
+          try {
+            await sendToBackground({ type: "focusPage" });
+          } catch {
+            /* ignore */
+          }
+          await sleep(300);
+          filled = fillOnce();
+          if (!filled) {
+            await sleep(400);
+            filled = promptFilled(getPromptInput() || input, prompt);
+          }
+        }
+        if (!filled) {
+          const { pasteDialog } = await chrome.storage.local.get("pasteDialog");
+          if (pasteDialog === true) {
+            const copied = await copyTextToClipboard(prompt);
+            await waitForContinue(
+              `Card ${index + 1}: Flow blocked insertion. ` +
+                (copied
+                  ? "The prompt is on your clipboard — paste it (Ctrl+V) in Flow's box, "
+                  : "Copy the prompt manually and paste it in Flow's box, ") +
+                `then click Continue.`
+            );
+          } else {
+            setCardStatus(card.id, "⚠ Auto-fill failed — Flow may reuse its previous prompt");
+          }
         }
       }
 
@@ -1662,8 +1785,19 @@ function buildDock() {
         unattachedCardRefs.forEach((r) => (r.attachedInFlow = true));
       }
 
-      await sleep(500);
-      const gen = await triggerGenerate(input);
+      await sleep(300);
+      // The trusted fill already put the prompt into Flow's model; the click
+      // must be trusted too, because Flow ignores synthetic ones.
+      let gen = { clicked: false, how: null };
+      if (trusted.ok) {
+        setCardStatus(card.id, "Clicking Start generation (trusted input)…");
+        const clicked = await trustedClick();
+        gen = clicked.ok
+          ? { clicked: true, how: "trusted input (clicked Start generation)" }
+          : await triggerGenerate(input);
+      } else {
+        gen = await triggerGenerate(input);
+      }
       if (!gen.clicked) {
         await waitForContinue(
           `Card ${index + 1}: no Generate button found — press Flow's Generate yourself, ` +
@@ -1671,11 +1805,11 @@ function buildDock() {
         );
       }
 
-      setCardStatus(card.id, `Waiting for Flow…${versionLabel}`);
+      setCardStatus(card.id, `Triggered (${gen.how}) — waiting for Flow…${versionLabel}`);
       const img = await waitForNewImage(before, 240000, (secs) =>
         setCardStatus(card.id, `Waiting… ${secs}s left${versionLabel}`)
       );
-      if (!img) throw new Error("timed out waiting for the image");
+      if (!img) throw new Error(`timed out waiting for the image (trigger: ${gen.how})`);
       lastFlowImage = img;
 
       setCardStatus(card.id, "Importing to Renderly…");
@@ -1819,6 +1953,12 @@ function buildDock() {
       stopBtn.style.display = "none";
       scheduleSaveCards();
       setTimeout(() => setProgress(null), 4000);
+      // Drop the debugger session so Chrome's "being debugged" bar goes away.
+      try {
+        await sendToBackground({ type: "detachDebugger" });
+      } catch {
+        /* nothing attached */
+      }
     }
   };
 
