@@ -49,6 +49,25 @@ Options (see `node flow.js --help`): `--channel <id>` (import into Renderly
 via `POST /api/channels/{id}/import`), `--upscale <off|HD|2K|4K>`, `--versions <1-4>`,
 `--refs`, `--backend`, `--out`, `--timeout`, `--browser`, `--diag`.
 
+## Prepare (frozen WhisperRadar contract)
+
+```
+node flow.js --prepare --file <batch.json> --report <flow_prepare.json> [--flow-project <url|name>]
+```
+
+Opens or creates the batch's Flow project, gets every reference into the
+project gallery (`uploaded` / `reused` / `missing`), and writes the report
+**atomically as soon as the project exists** (again after the refs) — it never
+generates. `FLOW_PROJECT_URL=<url>` is printed un-prefixed on stdout. The
+report schema (version 1) matches FlowImagesGen's, so WhisperRadar can drive
+either tool the same way; changing the schema means updating both sides and
+FlowImagesGen's `NEXT_SESSION.md`.
+
+The driver service exposes the same step: `POST /api/prepare` with optional
+`{ "shotlistPath", "reportPath", "flowProject" }` overrides (defaults come from
+the saved config); `GET /api/status` then reports `"mode": "prepare"` while it
+runs.
+
 ## Notes
 
 - Keep the Renderly backend running (`start.bat`) when using `--channel`.

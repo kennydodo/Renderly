@@ -76,20 +76,29 @@ function isRunning() {
   return !!(run && run.child && run.exitCode === null);
 }
 
-function startRun(config) {
+function startRun(config, mode = "generate") {
   if (isRunning()) throw new Error("a batch is already running — stop it first");
 
   if (!config.shotlistPath || !fs.existsSync(config.shotlistPath)) {
     throw new Error(`shotlist not found: ${config.shotlistPath}`);
   }
 
-  const args = ["--file", config.shotlistPath, "--channel", config.channel];
-  if ((config.project || "").trim()) args.push("--project", config.project.trim());
-  if ((config.refs || "").trim()) args.push("--refs", config.refs.trim());
-  if ((config.master || "").trim()) args.push("--master", config.master.trim());
-  if ((config.outPath || "").trim()) args.push("--out", config.outPath.trim());
-  if (config.upscale !== undefined && config.upscale !== null) {
-    args.push("--upscale", String(config.upscale));
+  const args =
+    mode === "prepare"
+      ? // Prepare: open/create the Flow project and upload refs; never generates.
+        ["--prepare", "--file", config.shotlistPath]
+      : ["--file", config.shotlistPath, "--channel", config.channel];
+  if (mode === "prepare") {
+    if ((config.reportPath || "").trim()) args.push("--report", config.reportPath.trim());
+    if ((config.flowProject || "").trim()) args.push("--flow-project", config.flowProject.trim());
+  } else {
+    if ((config.project || "").trim()) args.push("--project", config.project.trim());
+    if ((config.refs || "").trim()) args.push("--refs", config.refs.trim());
+    if ((config.master || "").trim()) args.push("--master", config.master.trim());
+    if ((config.outPath || "").trim()) args.push("--out", config.outPath.trim());
+    if (config.upscale !== undefined && config.upscale !== null) {
+      args.push("--upscale", String(config.upscale));
+    }
   }
 
   const child = spawn(process.execPath, [FLOW_JS, ...args], {
@@ -99,6 +108,7 @@ function startRun(config) {
 
   run = {
     child,
+    mode,
     startedAt: new Date().toISOString(),
     log: [],
     currentCard: null,
@@ -200,6 +210,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/api/status") {
       return sendJson(res, 200, {
         running: isRunning(),
+        mode: run ? run.mode || "generate" : null,
         startedAt: run ? run.startedAt : null,
         currentCard: run ? run.currentCard : null,
         counts: run ? run.counts : { ok: 0, failed: 0, total: 0 },
@@ -292,6 +303,17 @@ const server = http.createServer(async (req, res) => {
       }
       startRun(config);
       return sendJson(res, 200, { started: true });
+    }
+    if (req.method === "POST" && req.url === "/api/prepare") {
+      // Frozen WhisperRadar contract, Renderly half: open/create the Flow
+      // project and upload refs, then write the report. Never generates.
+      const body = await readBody(req);
+      const config = loadConfig();
+      for (const key of ["shotlistPath", "reportPath", "flowProject"]) {
+        if (typeof body[key] === "string" && body[key].trim()) config[key] = body[key].trim();
+      }
+      startRun(config, "prepare");
+      return sendJson(res, 200, { started: true, mode: "prepare" });
     }
     if (req.method === "POST" && req.url === "/api/stop") {
       await readBody(req);

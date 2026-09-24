@@ -52,6 +52,9 @@ function parseArgs(argv) {
     refs: [],
     timeout: 240000,
     master: "",
+    prepare: false,
+    report: null,
+    flowProject: null, // Flow project URL or name (NOT Renderly's --project)
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -61,6 +64,9 @@ function parseArgs(argv) {
     else if (a === "--master") opts.master = next();
     else if (a === "--channel") opts.channel = next();
     else if (a === "--project") opts.project = next();
+    else if (a === "--flow-project") opts.flowProject = next();
+    else if (a === "--report") opts.report = path.resolve(next());
+    else if (a === "--prepare") opts.prepare = true;
     else if (a === "--backend") opts.backend = String(next()).replace(/\/+$/, "");
     else if (a === "--refs")
       opts.refs = String(next())
@@ -87,6 +93,7 @@ function usage() {
 
   node flow.js --file prompts.json [--channel 3] [--refs a.png,b.png]
   node flow.js --prompt "..." [--refs a.png] [--versions 2]
+  node flow.js --prepare --file prompts.json --report <path>
   node flow.js --diag
 
 Options:
@@ -95,6 +102,9 @@ Options:
   --master "<text>"  Style prefix prepended to every card prompt
   --channel <id>     Renderly channel id — results are imported via /api/channels/{id}/import
   --project <id/name> Renderly project inside the channel — imports land there
+  --prepare          Open/create the Flow project and upload refs; NEVER generates
+  --report <path>    Atomic prepare report (frozen WhisperRadar contract, schema 1)
+  --flow-project <url|name>  Flow project to open or create (NOT Renderly's --project)
   --refs <a,b,...>   Global reference images (attached once, persist for every card)
   --versions <1-4>   Generations per card (default 1)
   --upscale <off|HD|2K|4K>  Renderly GPU upscale after import; off disables (default 2K)
@@ -1656,6 +1666,261 @@ async function clearChipsTrusted(page) {
 
 /* ================= Main ================= */
 
+/* ================= Prepare (frozen WhisperRadar contract) ================= */
+
+/**
+ * Prepare a Flow project for a batch, without generating anything. This is the
+ * Renderly half of the frozen contract documented in FlowImagesGen's
+ * NEXT_SESSION.md:
+ *   1. the report file (--report) is the interface, written ATOMICALLY as soon
+ *      as the project exists - not at exit - so a later crash still leaves the
+ *      project URL behind;
+ *   2. FLOW_PROJECT_URL=<url> is printed un-prefixed on stdout for manual runs;
+ *   3. every reference is reported as uploaded | reused | missing, which lets
+ *      the caller switch to refMode "assets" (attach by name, never upload).
+ * The report is optional and its absence is never fatal.
+ */
+const PREPARE_SCHEMA_VERSION = 1;
+
+/** A reader must never catch a half-written report, so write then rename. */
+function writeReportAtomic(file, report) {
+  const resolved = path.resolve(file);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  const temp = `${resolved}.tmp`;
+  fs.writeFileSync(temp, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  fs.renameSync(temp, resolved);
+}
+
+function projectIdFrom(url) {
+  const match = /\/project\/([0-9a-fA-F-]{8,})/.exec(String(url ?? ""));
+  return match ? match[1] : null;
+}
+
+/** Unique reference paths across the whole batch, in first-seen order. */
+function collectRefs(cards, opts) {
+  const out = [];
+  for (const card of cards || []) {
+    for (const ref of card.refs || []) {
+      const p = String(ref).trim();
+      if (p && !out.includes(p)) out.push(p);
+    }
+  }
+  for (const ref of opts.refs || []) {
+    if (!out.includes(ref)) out.push(ref);
+  }
+  return out;
+}
+
+function isInsideFlowProject(page) {
+  return /\/project\//.test(page.url());
+}
+
+async function findProjectCard(page, name) {
+  const candidates = [
+    "[data-testid='project-card']",
+    "a[href*='/project/']",
+    "mat-card:has(img)",
+  ];
+  for (const selector of candidates) {
+    const card = page.locator(selector).filter({ hasText: name }).first();
+    if ((await card.count().catch(() => 0)) > 0 && (await card.isVisible().catch(() => false))) {
+      return card;
+    }
+  }
+  return null;
+}
+
+/**
+ * Land inside a Flow project: reuse the one already open, open the named one
+ * from the project list, or create a new project. Never adopts the landing
+ * page's "most recent project" silently - that is said out loud first.
+ */
+async function ensureFlowProject(page, name) {
+  if (isInsideFlowProject(page)) {
+    console.log("Already inside a Flow project.");
+    return { created: false };
+  }
+  if (name) {
+    const card = await findProjectCard(page, name);
+    if (card) {
+      console.log(`Opening Flow project "${name}".`);
+      await card.click();
+      await sleep(1500);
+      return { created: false };
+    }
+    console.log(`Flow project "${name}" was not found in the project list; creating a new one.`);
+  }
+  console.log("Creating a new Flow project.");
+  const button = page
+    .locator("button[aria-label='Start new session'], button:has-text('New project')")
+    .first();
+  await button.click({ timeout: 15000 });
+  await sleep(2000);
+  return { created: true };
+}
+
+/** The project's own title as shown in its header (Flow names new ones by date). */
+async function flowProjectTitle(page) {
+  const title = page
+    .locator("input.editable-text-input, flow-editable-text input, [aria-label='Editable text']")
+    .first();
+  if (!(await title.isVisible().catch(() => false))) return null;
+  const value = await title.inputValue().catch(() => null);
+  if (value && value.trim()) return value.trim();
+  return ((await title.innerText().catch(() => "")) || "").trim() || null;
+}
+
+/**
+ * Read-only "is this reference already a project asset?" check - opens the
+ * asset library, searches the full filename then the stem, and scores the rows
+ * the same way attachExistingAsset does. Clicks nothing.
+ */
+async function galleryHasAsset(page, name) {
+  await closeAssetLibrary(page);
+  await sleep(400);
+  if (!(await openAssetLibrary(page).catch(() => false))) return false;
+  const search = page
+    .locator("input.search-input[aria-label='Search assets'], input[placeholder='Search assets']")
+    .first();
+  const searchFor = async (term) => {
+    if (!(await search.isVisible().catch(() => false))) return;
+    await search.fill("").catch(() => {});
+    await search.fill(term).catch(() => {});
+    await sleep(1800);
+  };
+  const items = page.locator("button.asset-item[role='option']");
+  const readTitles = async () => {
+    const n = await items.count().catch(() => 0);
+    const out = [];
+    for (let index = 0; index < n; index++) {
+      const title = (
+        (await items
+          .nth(index)
+          .locator("span.asset-title, .asset-title")
+          .first()
+          .innerText()
+          .catch(() => "")) || ""
+      ).trim();
+      if (title) out.push(title);
+    }
+    return out;
+  };
+  const stem = name.replace(/\.[a-z0-9]+$/i, "");
+  const target = stem.toLowerCase();
+  await searchFor(name);
+  let titles = await readTitles();
+  if (!titles.length) {
+    await searchFor(stem);
+    titles = await readTitles();
+  }
+  const fileish = (t) => /\.[a-z0-9]+$/i.test(t) || /refupload/i.test(t);
+  return titles.some((title) => {
+    const low = title.toLowerCase();
+    const titleStem = low.replace(/\.[a-z0-9]+$/i, "");
+    return (
+      low === name.toLowerCase() ||
+      titleStem === target ||
+      (fileish(title) && titleStem.includes(target)) ||
+      (fileish(title) && low.includes(target))
+    );
+  });
+}
+
+/** The prepare run: project + gallery refs + report. Never generates. */
+async function prepareSession(page, opts, cards) {
+  await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
+  try {
+    await page.waitForURL(/accounts\.google\.(?:com|co)/, { timeout: 6000 });
+    console.log("\nSign-in required: log into Google in the opened browser window.");
+    await pause("Press Enter here after you are signed in…");
+    await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
+  } catch {
+    /* no sign-in redirect — the prompt-box check below verifies the state */
+  }
+  await installHelpers(page);
+  const promptUp = await page
+    .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
+      timeout: 15000,
+    })
+    .then(() => true)
+    .catch(() => false);
+  if (!promptUp) {
+    await pause("Sign into Google in the opened browser window, then press Enter…");
+    await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
+    await installHelpers(page);
+    await page.waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
+      timeout: 60000,
+    });
+  }
+
+  const sessionSeen = new Set();
+  let created = false;
+  const target = String(opts.flowProject || "").trim();
+  if (target && /^https?:\/\//i.test(target)) {
+    console.log(`Opening Flow project ${target}`);
+    await page.goto(target, { waitUntil: "domcontentloaded" });
+    await sleep(3000);
+  } else {
+    if (!target) {
+      console.log(
+        "No --flow-project given: using the project that is already open, or creating a new one."
+      );
+    }
+    const result = await ensureFlowProject(page, target || null);
+    created = Boolean(result.created);
+  }
+  await sleep(1500);
+
+  const url = page.url();
+  const report = {
+    schemaVersion: PREPARE_SCHEMA_VERSION,
+    projectUrl: url,
+    projectId: projectIdFrom(url),
+    project: target && !/^https?:\/\//i.test(target) ? target : await flowProjectTitle(page),
+    created,
+    jobName: opts.file ? stemName(path.basename(opts.file)) : null,
+    preparedAt: new Date().toISOString(),
+    refs: [],
+  };
+
+  // Written before the reference work so the URL survives a crash later on.
+  if (opts.report) writeReportAtomic(opts.report, report);
+  process.stdout.write(`FLOW_PROJECT_URL=${url}\n`);
+  console.log(`Flow project ${created ? "created" : "opened"}: ${url}`);
+
+  const refs = collectRefs(cards, opts);
+  if (refs.length === 0) {
+    console.log("This batch declares no references.");
+  } else {
+    console.log(`References: ${refs.length} unique image(s)`);
+    for (const refPath of refs) {
+      const name = path.basename(refPath);
+      let status = "missing";
+      if (await galleryHasAsset(page, name).catch(() => false)) {
+        status = "reused";
+      } else if (fs.existsSync(refPath)) {
+        const uploaded = await attachUploadedFile(page, refPath, sessionSeen).catch(() => false);
+        status = uploaded ? "uploaded" : "missing";
+      } else {
+        console.log(`  ⚠ ${name}: file not found on disk`);
+      }
+      report.refs.push({ name: stemName(name), kind: "image", status, path: refPath });
+      console.log(`  ${name}: ${status}`);
+    }
+    if (opts.report) writeReportAtomic(opts.report, report);
+    // Uploading attaches chips to the prompt box; this run generates nothing.
+    await clearChipsTrusted(page).catch(() => {});
+  }
+
+  const uploaded = report.refs.filter((r) => r.status === "uploaded").length;
+  const reused = report.refs.filter((r) => r.status === "reused").length;
+  const missing = report.refs.filter((r) => r.status === "missing").length;
+  console.log(
+    `\nPrepare finished — ${uploaded} uploaded, ${reused} reused, ${missing} missing` +
+      `${opts.report ? ` · report: ${opts.report}` : ""}`
+  );
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -1673,6 +1938,19 @@ async function main() {
   }
   // Master prompt: --master flag wins, else the JSON file's "master" field.
   opts.master = (opts.master || "").trim() || (opts.masterSource || "").trim();
+
+  if (opts.prepare) {
+    // Prepare needs the batch file's refs only — no channel, no backend, no
+    // generation, so the whole Renderly-side resolution below is skipped.
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
+    const { context, page } = await launchChrome(opts);
+    try {
+      await prepareSession(page, opts, cards);
+    } finally {
+      await context.close().catch(() => {});
+    }
+    return;
+  }
 
   fs.mkdirSync(opts.out, { recursive: true });
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
@@ -1781,6 +2059,19 @@ async function main() {
     return;
   }
 
+  launchChrome(opts).then(async ({ context, page }) => {
+    try {
+      await runFlowSession(page, opts, cards);
+    } finally {
+      // Always close: a mid-batch failure must not hang the process or keep
+      // the persistent profile locked for the next launch.
+      await context.close().catch(() => {});
+    }
+  });
+}
+
+/** Launch the persistent-profile Chrome both the generate and prepare paths share. */
+async function launchChrome(opts) {
   console.log("Launching Chrome (persistent profile keeps you signed in)…");
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     channel: opts.browser || "chrome",
@@ -1799,13 +2090,7 @@ async function main() {
     ],
   });
   const page = context.pages()[0] || (await context.newPage());
-  try {
-    await runFlowSession(page, opts, cards);
-  } finally {
-    // Always close: a mid-batch failure must not hang the process or keep
-    // the persistent profile locked for the next launch.
-    await context.close().catch(() => {});
-  }
+  return { context, page };
 }
 
 async function runFlowSession(page, opts, cards) {
