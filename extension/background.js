@@ -203,6 +203,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (msg.type === "download") {
+        // chrome.downloads on the backend URL: not subject to Flow's CORS rules
+        // or to Chrome's automatic-download blocking for page-initiated blobs.
+        const result = await new Promise((resolve) => {
+          try {
+            chrome.downloads.download(
+              { url: msg.url, filename: msg.filename, saveAs: false },
+              (downloadId) => {
+                const err = chrome.runtime.lastError;
+                resolve({
+                  ok: true,
+                  downloadId: err ? null : downloadId,
+                  error: err ? err.message : null,
+                });
+              }
+            );
+          } catch (err) {
+            resolve({ ok: true, downloadId: null, error: err.message });
+          }
+        });
+        sendResponse(result);
+        return;
+      }
+
       if (msg.type === "focusPage") {
         // Programmatic prompt insertion fails while the window is unfocused.
         const tab = sender && sender.tab;

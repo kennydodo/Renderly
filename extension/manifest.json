@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Flow × Renderly",
-  "version": "1.15.1",
+  "version": "1.15.2",
   "description": "Prompt presets and one-click saving of Google Flow images into Renderly channels.",
-  "permissions": ["storage", "activeTab", "scripting", "debugger"],
+  "permissions": ["storage", "activeTab", "scripting", "debugger", "downloads"],
   "host_permissions": [
     "https://labs.google/*",
     "https://flow.google.com/*",

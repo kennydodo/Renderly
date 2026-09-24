@@ -539,6 +539,34 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(objUrl), 10000);
 }
 
+// Save the copy Renderly already holds. Preferred route is chrome.downloads on
+// the backend URL — a page-initiated blob download gets dropped by Chrome's
+// automatic-download blocking, and fetching Flow's own image is CORS-bound.
+async function saveToDisk(imageUrl, filename) {
+  if (!imageUrl) return { ok: false, error: "no image url" };
+  let absolute;
+  try {
+    const base = await getBackendBase();
+    absolute = new URL(imageUrl, base).href;
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  try {
+    const res = await sendToBackground({ type: "download", url: absolute, filename });
+    if (res.downloadId) return { ok: true };
+    throw new Error(res.error || "download rejected");
+  } catch (err) {
+    try {
+      const blob = await fetchImageAsBlob(absolute);
+      if (!blob) throw new Error("image fetch failed");
+      downloadBlob(blob, filename);
+      return { ok: true };
+    } catch (fallbackErr) {
+      return { ok: false, error: fallbackErr.message || err.message };
+    }
+  }
+}
+
 async function importToRenderly(channelId, dataUrl, name, prompt) {
   const res = await sendToBackground({
     type: "importGeneration",
@@ -1792,6 +1820,13 @@ function buildDock() {
       if (trusted.ok) {
         setCardStatus(card.id, "Clicking Start generation (trusted input)…");
         const clicked = await trustedClick();
+        // Release the debugger as soon as the click lands: while it stays
+        // attached, Chrome drops the result download that follows.
+        try {
+          await sendToBackground({ type: "detachDebugger" });
+        } catch {
+          /* nothing attached */
+        }
         gen = clicked.ok
           ? { clicked: true, how: "trusted input (clicked Start generation)" }
           : await triggerGenerate(input);
@@ -1825,6 +1860,7 @@ function buildDock() {
         (genRecord && genRecord.name) || cardName || "flow-image"
       );
       runCostUsd += (genRecord && genRecord.cost_usd) || 0;
+      let downloadUrl = genRecord && genRecord.image_url;
 
       if (autoUpscaleCheck.checked) {
         setCardStatus(card.id, `Upscaling (local GPU)…${versionLabel}`);
@@ -1836,23 +1872,15 @@ function buildDock() {
           });
           label = `${up.name} (${up.image_size})`;
           runCostUsd += up.cost_usd || 0;
-          const base = await getBackendBase();
-          const res = await fetch(new URL(up.image_url, base).href);
-          downloadBlob(await res.blob(), `${fileBase}.png`);
-          labels.push(label);
-          continue;
+          downloadUrl = up.image_url || downloadUrl;
         } catch (err) {
           setCardStatus(card.id, `Upscale skipped (${err.message})`);
         }
       }
 
       if (autoUpscaleCheck.checked) {
-        try {
-          const blob = await fetchImageAsBlob(img.currentSrc || img.src);
-          downloadBlob(blob, `${fileBase}.png`);
-        } catch {
-          /* gallery copy still exists */
-        }
+        const saved = await saveToDisk(downloadUrl, `${fileBase}.png`);
+        if (!saved.ok) setCardStatus(card.id, `⚠ Download failed: ${saved.error}`);
       }
       labels.push(label);
     }
