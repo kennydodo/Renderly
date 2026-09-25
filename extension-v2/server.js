@@ -103,6 +103,9 @@ function startRun(config, mode = "generate") {
   }
   // Which Google account the batch runs as (config, not code).
   if ((config.profileDir || "").trim()) args.push("--profile", config.profileDir.trim());
+  // Render only the caller's missing list, and skip what is already on disk.
+  if ((config.only || "").trim()) args.push("--only", config.only.trim());
+  if (config.force) args.push("--force");
 
   const child = spawn(process.execPath, [FLOW_JS, ...args], {
     cwd: DIR,
@@ -266,6 +269,8 @@ const server = http.createServer(async (req, res) => {
         if (typeof body[key] === "string") config[key] = body[key];
       }
       if (typeof body.profileDir === "string") config.profileDir = body.profileDir.trim();
+      if (typeof body.only === "string") config.only = body.only.trim();
+      if (body.force !== undefined) config.force = Boolean(body.force);
       if (body.upscale !== undefined) config.upscale = normalizeUpscale(body.upscale);
       saveConfig(config);
       return sendJson(res, 200, config);

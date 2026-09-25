@@ -60,6 +60,16 @@ Options (see `node flow.js --help`): `--channel <id>` (import into Renderly
 via `POST /api/channels/{id}/import`), `--upscale <off|HD|2K|4K>`, `--versions <1-4>`,
 `--refs`, `--backend`, `--out`, `--timeout`, `--browser`, `--diag`.
 
+Resume and scoping: a card whose output PNG is already in `--out` is **skipped**
+(logged as skipped, not failed) instead of re-rendered with a `-1` duplicate —
+`--force` re-renders it anyway, and `--only a.png,b.png` renders just those
+cards (the caller's missing list). The driver service accepts the same two as
+`only` / `force` in `POST /api/config`.
+
+If the profile is not signed in, the driver now **fails immediately** with the
+exact `--login` command instead of opening a window and dying on a Playwright
+timeout about a missing prompt box.
+
 ## Prepare (frozen WhisperRadar contract)
 
 ```

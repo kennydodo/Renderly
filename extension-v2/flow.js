@@ -64,6 +64,8 @@ function parseArgs(argv) {
     report: null,
     flowProject: null, // Flow project URL or name (NOT Renderly's --project)
     profile: null, // profile folder override (default: ./profile)
+    only: [], // render only these card names (e.g. the caller's missing list)
+    force: false, // re-render cards whose output already exists
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -76,6 +78,12 @@ function parseArgs(argv) {
     else if (a === "--flow-project") opts.flowProject = next();
     else if (a === "--profile") opts.profile = next();
     else if (a === "--login") opts.login = true;
+    else if (a === "--force") opts.force = true;
+    else if (a === "--only")
+      opts.only = String(next())
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
     else if (a === "--report") opts.report = path.resolve(next());
     else if (a === "--prepare") opts.prepare = true;
     else if (a === "--backend") opts.backend = String(next()).replace(/\/+$/, "");
@@ -118,6 +126,8 @@ Options:
   --flow-project <url|name>  Flow project to open or create (NOT Renderly's --project)
   --profile <dir>    Chrome profile folder (default ./profile) — picks the Google account
   --login            Open that profile and wait until you are signed in, then exit
+  --only <a,b,...>   Render only these card names (the caller's missing list)
+  --force            Re-render cards whose output PNG already exists
   --refs <a,b,...>   Global reference images (attached once, persist for every card)
   --versions <1-4>   Generations per card (default 1)
   --upscale <off|HD|2K|4K>  Renderly GPU upscale after import; off disables (default 2K)
@@ -639,6 +649,52 @@ async function installHelpers(page) {
           complete: img.complete,
         }));
 
+    // Refusal / error banners, scoped to the CURRENT attempt. A banner left
+    // behind by an earlier card must never be read as this card's outcome -
+    // that mistake failed sixteen consecutive items on a 156-item batch in
+    // FlowImagesGen while Flow was generating every one of them. So every
+    // matching element already on screen is tagged before the trigger is
+    // clicked, and only an untagged one counts afterwards.
+    const ALERT_PATTERNS = [
+      /unusual activity/i,
+      /you have not been charged/i,
+      /generation failed/i,
+      /something went wrong/i,
+      /out of credits/i,
+      /limit reached/i,
+    ];
+    const alertText = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
+    const alertNodes = () => {
+      const seen = [];
+      for (const el of deepQueryAll("[role='alert'], [data-testid='error-banner']")) {
+        if (isVisible(el) && alertText(el)) seen.push(el);
+      }
+      // Text-only banners have no role, so walk the app shell for the
+      // innermost node whose own text matches one of the patterns.
+      for (const el of deepQueryAll("main *").slice(0, 4000)) {
+        if (seen.includes(el) || !isVisible(el)) continue;
+        const text = alertText(el);
+        if (!text || text.length > 300) continue;
+        if (!ALERT_PATTERNS.some((re) => re.test(text))) continue;
+        if (el.firstElementChild && ALERT_PATTERNS.some((re) => re.test(alertText(el.firstElementChild)))) {
+          continue; // an ancestor of a match, not the banner itself
+        }
+        seen.push(el);
+      }
+      return seen;
+    };
+    H.markStaleAlerts = () => {
+      for (const el of alertNodes()) el.setAttribute("data-renderly-stale", "1");
+      return true;
+    };
+    H.freshAlert = () => {
+      for (const el of alertNodes()) {
+        if (el.hasAttribute("data-renderly-stale")) continue;
+        return alertText(el).slice(0, 200) || "Flow reported a failed generation";
+      }
+      return null;
+    };
+
     // Click Flow's upload / "Add ingredients" control. Returns a description
     // or false. The native file chooser it opens is caught by the Node side.
     // "Add ingredients to the prompt box" wins over the generic "Add media
@@ -1033,18 +1089,18 @@ async function waitForNewImage(page, timeoutMs, onTick, sessionSeen, seenHashes)
     }
     const stableFor = candidate ? Date.now() - candidateSince : 0;
     if (candidate && stableFor >= STABLE_MS) {
-      const tile = tileBySrc.get(candidate);
-      const dataUrl = await fetchImageDataUrl(page, candidate).catch(() => null);
-      const { buffer } = dataUrl ? dataUrlToBuffer(dataUrl) : { buffer: null };
-      const hash = buffer ? hashBytes(buffer) : null;
-      if (tileIsResult(tile, hash, seenHashes)) {
+      const fetched = await fetchResultBuffer(page, candidate);
+      const tile = tileBySrc.get(fetched ? fetched.src : candidate) || tileBySrc.get(candidate);
+      const hash = fetched ? hashBytes(fetched.buffer) : null;
+      if (fetched && tileIsResult(tile, hash, seenHashes)) {
         // consume every fresh URL at acceptance, not just the candidate —
         // one generation can surface several URLs and the extras must never
         // be attributed to the next card
         for (const s of fresh) sessionSeen.add(s);
         sessionSeen.add(candidate);
+        sessionSeen.add(fetched.src);
         seenHashes.add(hash);
-        return { src: candidate, buffer };
+        return { src: fetched.src, buffer: fetched.buffer };
       }
       // Not a result: an echo of a known image (hash match), or a tile whose
       // bytes could not be read. Mark the URL so it is not re-fetched every
@@ -1057,6 +1113,10 @@ async function waitForNewImage(page, timeoutMs, onTick, sessionSeen, seenHashes)
       candidate = null;
       candidateSince = 0;
     }
+    // A refused generation shows up as a banner, not as an image. Only one
+    // that appeared AFTER this card's trigger counts (markStaleAlerts).
+    const refusal = await page.evaluate(() => window.__renderly.freshAlert()).catch(() => null);
+    if (refusal) return { refused: refusal };
     if (onTick) onTick(Math.round((Date.now() - started) / 1000));
     await sleep(1500);
   }
@@ -1066,14 +1126,14 @@ async function waitForNewImage(page, timeoutMs, onTick, sessionSeen, seenHashes)
   for (let i = lastTiles.length - 1; i >= 0; i--) {
     const tile = lastTiles[i];
     if (!tile.canRedo || !isFinalResultUrl(tile.src) || sessionSeen.has(tile.src)) continue;
-    const dataUrl = await fetchImageDataUrl(page, tile.src).catch(() => null);
-    const { buffer } = dataUrl ? dataUrlToBuffer(dataUrl) : { buffer: null };
-    const hash = buffer ? hashBytes(buffer) : null;
-    if (tileIsResult(tile, hash, seenHashes)) {
+    const fetched = await fetchResultBuffer(page, tile.src);
+    const hash = fetched ? hashBytes(fetched.buffer) : null;
+    if (fetched && tileIsResult(tile, hash, seenHashes)) {
       sessionSeen.add(tile.src);
+      sessionSeen.add(fetched.src);
       seenHashes.add(hash);
       console.log(`  salvaged a finished tile at timeout`);
-      return { src: tile.src, buffer };
+      return { src: fetched.src, buffer: fetched.buffer };
     }
   }
   return null;
@@ -1098,6 +1158,28 @@ async function waitForIdle(page, timeoutMs, sessionSeen) {
   return false;
 }
 
+// Flow's prompt box only exists once signed in. In service mode there is no
+// terminal to press Enter on, so a missing session must fail with the exact
+// fix instead of opening a window and waiting out a Playwright timeout.
+function notSignedInError(opts) {
+  const dir = profileDirFor(opts);
+  const shown = path.relative(__dirname, dir) || dir;
+  return new Error(
+    "Not signed in to Flow - this Chrome profile has no Google session.\n" +
+      `  sign in once:  node flow.js --login --profile ${shown}\n` +
+      "  (the profile folder selects the account; see driver-config.json)"
+  );
+}
+
+async function promptBoxReady(page, timeoutMs) {
+  return page
+    .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
+      timeout: timeoutMs,
+    })
+    .then(() => true)
+    .catch(() => false);
+}
+
 async function fetchImageDataUrl(page, src) {
   return page.evaluate(async (url) => {
     const res = await fetch(url);
@@ -1110,6 +1192,32 @@ async function fetchImageDataUrl(page, src) {
       reader.readAsDataURL(blob);
     });
   }, src);
+}
+
+// The result tile moves as the grid re-renders and its URL can change under
+// the same image, so re-resolve it on every attempt instead of reusing the
+// first src we saw. Three attempts, then give up so the caller can keep
+// waiting for another candidate.
+async function fetchResultBuffer(page, wantedSrc, attempts = 3) {
+  let src = wantedSrc;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const tiles = await page.evaluate(() => window.__renderly.collectTiles()).catch(() => []);
+    const match =
+      tiles.find((t) => t.src === src) ||
+      // Newest first: collectTiles is in DOM order and Flow inserts newest last.
+      [...tiles].reverse().find((t) => t.canRedo && isFinalResultUrl(t.src));
+    if (match) src = match.src;
+    const dataUrl = await fetchImageDataUrl(page, src).catch(() => null);
+    if (dataUrl) {
+      const { buffer } = dataUrlToBuffer(dataUrl);
+      if (buffer) return { src, buffer };
+    }
+    if (attempt < attempts) {
+      console.log(`  download attempt ${attempt}/${attempts} failed - re-resolving the tile`);
+      await sleep(1200);
+    }
+  }
+  return null;
 }
 
 function dataUrlToBuffer(dataUrl) {
@@ -1405,10 +1513,8 @@ async function attachExistingAsset(page, name, sessionSeen) {
   let chosen = -1;
   let chosenTitle = "";
   let best = 0;
-  let fuzzy = -1;
   for (const { index, title } of rows) {
     if (!title) continue;
-    if (fuzzy < 0) fuzzy = index;
     const low = title.toLowerCase();
     const titleStem = low.replace(/\.[a-z0-9]+$/i, "");
     let score = 0;
@@ -1422,10 +1528,10 @@ async function attachExistingAsset(page, name, sessionSeen) {
       if (score === 3) break;
     }
   }
-  if (chosen < 0 && fuzzy >= 0) {
-    chosen = fuzzy;
-    chosenTitle = (rows.find((r) => r.index === fuzzy) || {}).title || "";
-  }
+  // Only a positive name match may be attached. The old fuzzy fallback grabbed
+  // the first row when nothing matched, which attaches an unrelated asset as
+  // this reference — and made the attach path disagree with the prepare
+  // presence check, losing a card when the upload that followed also failed.
   if (chosen < 0) return false;
   console.log(`  reusing project asset "${chosenTitle}" for "${name}"`);
   await items.nth(chosen).click({ timeout: 8000 }).catch(() => {});
@@ -1599,35 +1705,49 @@ async function attachRefs(page, refPaths, sessionSeen) {
     const name = path.basename(refPath);
     const chipCount = () =>
       page.evaluate(() => window.__renderly.chipCount()).catch(() => 0);
-    const before = await chipCount();
-    let ok = await attachExistingAsset(page, name, sessionSeen);
-    let chips = await chipCount();
-    if (!ok || chips <= before) {
-      // Not in the project (or the reuse click did not attach): upload it.
-      console.log(`  "${name}" not in the project - uploading it…`);
-      await attachUploadedFile(page, refPath, sessionSeen);
-      await closeAssetLibrary(page);
-      chips = await chipCount();
-      if (chips <= before) {
-        // The upload populated the project but did not attach the chip - now
-        // attach it through the reuse path, which is the reliable one. The
-        // new asset can take a moment to appear in the library's index, so
-        // retry a few times rather than skipping the card.
-        console.log(`  attaching the uploaded "${name}" from the project…`);
-        for (let attempt = 1; attempt <= 3 && chips <= before; attempt++) {
-          await closeAssetLibrary(page);
-          await sleep(1500);
-          ok = await attachExistingAsset(page, name, sessionSeen);
-          chips = await chipCount();
+    let attached = false;
+    // Two full passes. The presence search is flaky (a reference that attaches
+    // fine on a one-card retry was reported missing inside an 11-card batch,
+    // and the upload that followed failed too, losing the card), so give the
+    // whole search -> upload -> search cycle a second chance before failing.
+    for (let pass = 1; pass <= 2 && !attached; pass++) {
+      const before = await chipCount();
+      if (pass > 1) {
+        console.log(`  retrying "${name}" from scratch (pass ${pass})…`);
+        await closeAssetLibrary(page);
+        await sleep(2500);
+      }
+      let ok = await attachExistingAsset(page, name, sessionSeen);
+      let chips = await chipCount();
+      if (!ok || chips <= before) {
+        // Not in the project (or the reuse click did not attach): upload it.
+        console.log(`  "${name}" not in the project - uploading it…`);
+        await attachUploadedFile(page, refPath, sessionSeen);
+        await closeAssetLibrary(page);
+        chips = await chipCount();
+        if (chips <= before) {
+          // The upload populated the project but did not attach the chip - now
+          // attach it through the reuse path, which is the reliable one. The
+          // new asset can take a moment to appear in the library's index, so
+          // retry a few times rather than skipping the card.
+          console.log(`  attaching the uploaded "${name}" from the project…`);
+          for (let attempt = 1; attempt <= 3 && chips <= before; attempt++) {
+            await closeAssetLibrary(page);
+            await sleep(1500);
+            ok = await attachExistingAsset(page, name, sessionSeen);
+            chips = await chipCount();
+          }
         }
       }
+      attached = ok && chips > before;
     }
-    if (!ok || chips <= before) {
+    if (!attached) {
       await closeAssetLibrary(page);
       return { attached: false, reason: `could not attach "${name}"` };
     }
     await closeAssetLibrary(page);
-    console.log(`  after "${name}": ${chips} chip(s)`);
+    const chipsAfter = await chipCount();
+    console.log(`  after "${name}": ${chipsAfter} chip(s)`);
   }
   const deadline = Date.now() + 15000;
   let chips = 0;
@@ -1956,19 +2076,15 @@ async function prepareSession(page, opts, cards) {
   await installHelpers(page);
 
   const landed = /^https?:\/\//i.test(target) ? target : page.url();
-  const promptUp = await page
-    .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
-      timeout: 15000,
-    })
-    .then(() => true)
-    .catch(() => false);
+  const promptUp = await promptBoxReady(page, 15000);
   if (!promptUp) {
+    // No TTY (the driver service) means nobody can press Enter, so fail with
+    // the fix instead of waiting out a timeout on a page that will never load.
+    if (!(process.stdin && process.stdin.isTTY)) throw notSignedInError(opts);
     await pause("Sign into Google in the opened browser window, then press Enter…");
     await page.goto(landed, { waitUntil: "domcontentloaded" });
     await installHelpers(page);
-    await page.waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
-      timeout: 60000,
-    });
+    if (!(await promptBoxReady(page, 60000))) throw notSignedInError(opts);
   }
 
   const url = page.url();
@@ -2273,20 +2389,16 @@ async function runFlowSession(page, opts, cards) {
   // must have unseen bytes - that, and the redo control, is what keeps a
   // reference plate out of the results. Never a size comparison.
   const seenHashes = new Set();
-  const promptUp = await page
-    .waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
-      timeout: 15000,
-    })
-    .then(() => true)
-    .catch(() => false);
+  const promptUp = await promptBoxReady(page, 15000);
   if (!promptUp) {
+    // The driver service has no terminal to press Enter on: fail fast with the
+    // exact fix rather than opening a window and dying on a Playwright timeout.
+    if (!(process.stdin && process.stdin.isTTY)) throw notSignedInError(opts);
     console.log("\nFlow's prompt box not found — you are probably not signed in.");
     await pause("Sign into Google in the opened browser window, then press Enter…");
     await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
     await installHelpers(page);
-    await page.waitForFunction(() => window.__renderly && window.__renderly.getPromptInfo(), null, {
-      timeout: 60000,
-    });
+    if (!(await promptBoxReady(page, 60000))) throw notSignedInError(opts);
   }
 
   // Baseline: everything already on the page belongs to earlier sessions.
@@ -2431,6 +2543,17 @@ async function runFlowSession(page, opts, cards) {
         : safeFileName(card.name || `card-${ci + 1}`);
     console.log(`▶ ${cardLabel}${versionLabel}`);
 
+    // Resume: a card whose output is already on disk is done. WhisperRadar
+    // asks for "1 missing image" and the driver used to render the whole
+    // shotlist again, leaving "-1" duplicates beside every existing render.
+    const exists =
+      fs.existsSync(path.join(opts.out, `${baseName}.png`)) ||
+      fs.readdirSync(opts.out).some((f) => f.startsWith(`${baseName}-`) && f.endsWith(".png"));
+    if (exists && !opts.force) {
+      console.log(`  skipped — ${baseName}.png already rendered (--force to redo)`);
+      return "skipped";
+    }
+
     if (!composePrompt(opts, card).trim()) {
       throw new Error("empty prompt — nothing to generate");
     }
@@ -2524,6 +2647,9 @@ async function runFlowSession(page, opts, cards) {
     //    a fresh flow-content URL can just be a reference plate (an echo), and
     //    treating that as a started generation made the driver skip the
     //    trigger and then stall with nothing running.
+    //    Tag every refusal/error banner already on screen first: only one that
+    //    appears after this click can belong to this card.
+    await page.evaluate(() => window.__renderly.markStaleAlerts()).catch(() => {});
     let gen = { clicked: true, enabled: true, how: "auto" };
     const busyRes = await page
       .evaluate(() => window.__renderly.generationBusy())
@@ -2580,6 +2706,9 @@ async function runFlowSession(page, opts, cards) {
       waitedMs += Date.now() - started;
       console.log("");
       if (!result) break;
+      if (result.refused) {
+        throw new Error(`Flow refused the generation for "${cardLabel}": ${result.refused}`);
+      }
       finalBuffer = result.buffer;
       break;
     }
@@ -2629,11 +2758,26 @@ async function runFlowSession(page, opts, cards) {
 
   console.log(`\nBatch: ${cards.length} card(s) × ${versions} version(s)\n`);
 
+  const onlyList = (opts.only || []).map((s) => s.toLowerCase());
+  const inOnly = (card, ci) => {
+    if (!onlyList.length) return true;
+    const label = String(card.name || `card-${ci + 1}`).toLowerCase();
+    return onlyList.includes(label) || onlyList.includes(label.replace(/\.[a-z0-9]+$/, ""));
+  };
+
+  let skipped = 0;
   for (let ci = 0; ci < cards.length; ci++) {
+    const card = cards[ci];
+    if (!inOnly(card, ci)) {
+      console.log(`▶ ${card.name || `card ${ci + 1}`} — not in --only, skipped`);
+      skipped += versions;
+      continue;
+    }
     for (let v = 0; v < versions; v++) {
       try {
-        await runVersion(cards[ci], ci, v);
-        ok++;
+        const outcome = await runVersion(card, ci, v);
+        if (outcome === "skipped") skipped++;
+        else ok++;
       } catch (err) {
         failed++;
         console.log(`  ✕ failed: ${err.message}`);
@@ -2651,6 +2795,7 @@ async function runFlowSession(page, opts, cards) {
   console.log(
     `Batch finished — ${ok}/${cards.length * versions} succeeded` +
       (failed ? `, ${failed} failed` : "") +
+      (skipped ? `, ${skipped} skipped (output already on disk)` : "") +
       ` · $${costUsd.toFixed(2)}`
   );
   await pause("Press Enter to close the browser…");
