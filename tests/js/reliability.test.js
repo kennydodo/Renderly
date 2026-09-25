@@ -169,10 +169,56 @@ test("a stale banner is never read as this card's refusal", () => {
   assert.equal(H.freshAlert(), "Unusual activity detected");
 });
 
+function loadResume() {
+  return loadFunctions(
+    FLOW_JS,
+    "function cardOutputExists",
+    "function mimeOf",
+    { fs, path },
+    ["cardOutputExists", "shouldSkipCard", "cardInOnlyList"],
+    "resume helpers"
+  );
+}
+
 test("a card whose output exists is skipped, not re-rendered", () => {
-  const src = readFlow();
-  assert.match(src, /already rendered \(--force to redo\)/);
-  assert.match(src, /skipped \(output already on disk\)/);
+  const { cardOutputExists, shouldSkipCard } = loadResume();
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "renderly-resume-"));
+  try {
+    const opts = { out, force: false };
+    assert.equal(cardOutputExists(out, "S01_01_SCN_ZI"), false, "nothing rendered yet");
+    assert.equal(shouldSkipCard(opts, "S01_01_SCN_ZI"), false);
+
+    fs.writeFileSync(path.join(out, "S01_01_SCN_ZI.png"), "x");
+    assert.equal(shouldSkipCard(opts, "S01_01_SCN_ZI"), true, "already rendered");
+
+    // A "-1" duplicate from an earlier run also counts as done.
+    fs.writeFileSync(path.join(out, "S02_01_SCN_PR-1.png"), "x");
+    assert.equal(cardOutputExists(out, "S02_01_SCN_PR"), true);
+
+    // Another card's file must not make this one look finished.
+    assert.equal(cardOutputExists(out, "S03_01_SCN_ZI"), false);
+
+    // --force re-renders anyway.
+    assert.equal(shouldSkipCard({ out, force: true }, "S01_01_SCN_ZI"), false);
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable output folder renders instead of skipping silently", () => {
+  const { cardOutputExists } = loadResume();
+  assert.equal(cardOutputExists(path.join(os.tmpdir(), "renderly-does-not-exist-xyz"), "A.png"), false);
+});
+
+test("--only restricts the run to the caller's missing list", () => {
+  const { cardInOnlyList } = loadResume();
+  const card = { name: "S01_01_SCN_ZI" };
+  assert.equal(cardInOnlyList([], card, 0), true, "no --only means every card");
+  assert.equal(cardInOnlyList(["s01_01_scn_zi"], card, 0), true);
+  assert.equal(cardInOnlyList(["s01_01_scn_zi.png"], card, 0), true, "with or without extension");
+  assert.equal(cardInOnlyList(["s02_01_scn_pr"], card, 0), false);
+  // A card with no name falls back to its position, matching the file name.
+  assert.equal(cardInOnlyList(["card-3"], { name: "" }, 2), true);
 });
 
 test("the attach path cannot attach an unrelated asset", () => {

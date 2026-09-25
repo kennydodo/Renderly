@@ -1281,6 +1281,37 @@ function uniqueFilePath(dir, baseName) {
   return p;
 }
 
+/**
+ * Is this card's output already on disk? Any `baseName.png` or a previous
+ * `baseName-<n>.png` duplicate counts. An unreadable folder answers "no", so a
+ * broken path renders rather than silently skipping work.
+ */
+function cardOutputExists(outDir, baseName) {
+  try {
+    if (fs.existsSync(path.join(outDir, `${baseName}.png`))) return true;
+    return fs
+      .readdirSync(outDir)
+      .some((f) => f.startsWith(`${baseName}-`) && f.endsWith(".png"));
+  } catch {
+    return false;
+  }
+}
+
+/** Resume decision: skip a finished card unless --force asked for a redo. */
+function shouldSkipCard(opts, baseName) {
+  if (opts.force) return false;
+  return cardOutputExists(opts.out, baseName);
+}
+
+/** --only <names>: does this card belong to the caller's missing list? */
+function cardInOnlyList(onlyList, card, ci) {
+  if (!onlyList || !onlyList.length) return true;
+  // Either side may carry the extension or not, so compare stems.
+  const stem = (s) => String(s || "").toLowerCase().trim().replace(/\.[a-z0-9]+$/, "");
+  const label = stem(card.name || `card-${ci + 1}`);
+  return label.length > 0 && onlyList.some((entry) => stem(entry) === label);
+}
+
 function mimeOf(p) {
   if (/\.jpe?g$/i.test(p)) return "image/jpeg";
   if (/\.png$/i.test(p)) return "image/png";
@@ -2546,10 +2577,7 @@ async function runFlowSession(page, opts, cards) {
     // Resume: a card whose output is already on disk is done. WhisperRadar
     // asks for "1 missing image" and the driver used to render the whole
     // shotlist again, leaving "-1" duplicates beside every existing render.
-    const exists =
-      fs.existsSync(path.join(opts.out, `${baseName}.png`)) ||
-      fs.readdirSync(opts.out).some((f) => f.startsWith(`${baseName}-`) && f.endsWith(".png"));
-    if (exists && !opts.force) {
+    if (shouldSkipCard(opts, baseName)) {
       console.log(`  skipped — ${baseName}.png already rendered (--force to redo)`);
       return "skipped";
     }
@@ -2759,16 +2787,11 @@ async function runFlowSession(page, opts, cards) {
   console.log(`\nBatch: ${cards.length} card(s) × ${versions} version(s)\n`);
 
   const onlyList = (opts.only || []).map((s) => s.toLowerCase());
-  const inOnly = (card, ci) => {
-    if (!onlyList.length) return true;
-    const label = String(card.name || `card-${ci + 1}`).toLowerCase();
-    return onlyList.includes(label) || onlyList.includes(label.replace(/\.[a-z0-9]+$/, ""));
-  };
 
   let skipped = 0;
   for (let ci = 0; ci < cards.length; ci++) {
     const card = cards[ci];
-    if (!inOnly(card, ci)) {
+    if (!cardInOnlyList(onlyList, card, ci)) {
       console.log(`▶ ${card.name || `card ${ci + 1}`} — not in --only, skipped`);
       skipped += versions;
       continue;
