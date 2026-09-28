@@ -1,6 +1,5 @@
 """Local image upscaling: Real-ESRGAN (ncnn-vulkan) on GPU, Pillow Lanczos on CPU."""
 
-import base64
 import json
 import os
 import re
@@ -32,10 +31,26 @@ _NOT_INSTALLED = (
     "backend/tools/realesrgan/ (or set UPSCALER_EXE in .env)."
 )
 
-_PROBE_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR4"
-    "2mNk+M9Qz4AFmBiY/IYAABnAA4FXK0mMAAAAAElFTkSuQmCC"
-)
+_PROBE_SIZE = 64
+
+
+def _write_probe_png(path: Path) -> None:
+    """A deterministic gradient, generated rather than shipped.
+
+    A 10x10 source gives _content_ok too little detail, so a perfect GPU result
+    is rejected as "not matching" and the upscaler silently falls back to CPU.
+    """
+    from PIL import Image
+
+    image = Image.new("RGB", (_PROBE_SIZE, _PROBE_SIZE))
+    image.putdata(
+        [
+            ((x * 4) % 256, (y * 4) % 256, ((x + y) * 2) % 256)
+            for y in range(_PROBE_SIZE)
+            for x in range(_PROBE_SIZE)
+        ]
+    )
+    image.save(path, "PNG")
 
 _RECACHE_AFTER_SECONDS = 3600
 
@@ -158,13 +173,31 @@ def _save_cache(data: dict) -> None:
         pass
 
 
+def _usable_icd_files(tools_dir: Path | None = None) -> list[str]:
+    """ICD files shipped with the engine whose driver exists on THIS machine.
+
+    nv-vk64.json / igvk64.json carry absolute DriverStore paths, so a checkout
+    copied from another machine names drivers that are not installed. Forcing
+    those into VK_DRIVER_FILES makes vkCreateInstance fail (-9) and every probe
+    look like a dead GPU, so unusable entries are skipped instead of trusted.
+    """
+    directory = tools_dir or _TOOLS_DIR
+    usable: list[str] = []
+    for path in sorted(directory.glob("*.json")):
+        if path.name == "device_cache.json":
+            continue
+        try:
+            library = json.loads(path.read_text(encoding="utf-8"))["ICD"]["library_path"]
+        except Exception:
+            continue
+        if isinstance(library, str) and Path(library).exists():
+            usable.append(str(path))
+    return usable
+
+
 def _icd_env() -> dict:
     """Point the Vulkan loader at locally written ICD files (NVIDIA + Intel)."""
-    files = [
-        str(f)
-        for f in sorted(_TOOLS_DIR.glob("*.json"))
-        if f.name != "device_cache.json"
-    ]
+    files = _usable_icd_files()
     if not files:
         return {}
     value = ";".join(files)
@@ -249,7 +282,7 @@ def _content_ok(src: Path, out_path: Path, factor: int, threshold: float = 60.0)
 
 def _probe_devices(exe: Path) -> dict[int, str]:
     """Probe Vulkan device indices 0..5; return {index: device_name} for working ones."""
-    _PROBE_PNG.write_bytes(base64.b64decode(_PROBE_PNG_B64))
+    _write_probe_png(_PROBE_PNG)
     devices: dict[int, str] = {}
     for idx in range(6):
         if _PROBE_OUT.exists():
