@@ -19,7 +19,7 @@ test("parseArgs takes --only and --force for resume runs", () => {
     FLOW_JS,
     "function normalizeUpscaleTier",
     "function usage",
-    { path, DEFAULT_BACKEND: "http://127.0.0.1:8022", OUTPUT_DIR: path.join(os.tmpdir(), "out"), DEFAULT_FLOWBATCH_DIR: path.join(os.tmpdir(), "flowbatch") },
+    { path, DEFAULT_BACKEND: "http://127.0.0.1:8022", OUTPUT_DIR: path.join(os.tmpdir(), "out"), DEFAULT_BACKEND_DIR: path.join(os.tmpdir(), "backend") },
     ["parseArgs"],
     "parseArgs"
   );

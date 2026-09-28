@@ -19,7 +19,7 @@ function loadCli() {
       path,
       DEFAULT_BACKEND: "http://127.0.0.1:8022",
       OUTPUT_DIR: path.join(os.tmpdir(), "renderly-test-output"),
-      DEFAULT_FLOWBATCH_DIR: path.join(os.tmpdir(), "renderly-test-flowbatch"),
+      DEFAULT_BACKEND_DIR: path.join(os.tmpdir(), "renderly-test-backend"),
     },
     ["parseArgs"],
     "parseArgs"

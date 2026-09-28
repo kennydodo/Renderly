@@ -29,10 +29,11 @@ const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 const PROFILE_DIR = path.join(__dirname, "profile");
 const OUTPUT_DIR = path.join(__dirname, "output");
 const FLOW_URL = "https://flow.google.com/";
-// Sibling checkout of the FlowBatch CLI (../../FlowBatch from here), used
-// only when --local-upscale asks us to upscale without ever touching
-// Renderly - see localUpscaleInPlace().
-const DEFAULT_FLOWBATCH_DIR = path.join(__dirname, "..", "..", "FlowBatch");
+// Renderly's own backend (../backend from here) - only used when
+// --local-upscale asks us to upscale without ever touching a Renderly
+// channel, by calling its already-installed local upscaler module
+// directly (no separate repo/checkout needed). See localUpscaleInPlace().
+const DEFAULT_BACKEND_DIR = path.join(__dirname, "..", "backend");
 
 /** The profile folder to launch: --profile wins (relative to this folder). */
 function profileDirFor(opts) {
@@ -71,8 +72,8 @@ function parseArgs(argv) {
     profile: null, // profile folder override (default: ./profile)
     only: [], // render only these card names (e.g. the caller's missing list)
     force: false, // re-render cards whose output already exists
-    localUpscale: false, // upscale with FlowBatch's own engine, never Renderly
-    flowbatchDir: DEFAULT_FLOWBATCH_DIR,
+    localUpscale: false, // upscale with the backend's own local engine, never import
+    upscalerDir: DEFAULT_BACKEND_DIR,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -109,7 +110,7 @@ function parseArgs(argv) {
     else if (a === "--drop-test") opts.dropTest = true;
     else if (a === "--import-only") opts.importOnly = true;
     else if (a === "--local-upscale") opts.localUpscale = true;
-    else if (a === "--flowbatch-dir") opts.flowbatchDir = path.resolve(next());
+    else if (a === "--upscaler-dir") opts.upscalerDir = path.resolve(next());
     else if (a === "--browser") opts.browser = next();
     else if (a === "--help" || a === "-h") opts.help = true;
   }
@@ -130,11 +131,12 @@ Options:
   --master "<text>"  Style prefix prepended to every card prompt
   --channel <id>     Renderly channel id — results are imported via /api/channels/{id}/import
   --project <id/name> Renderly project inside the channel — imports land there
-  --local-upscale    Never import into Renderly; upscale with FlowBatch's own
-                     local engine instead (needs --upscale != off). Ignores
+  --local-upscale    Never import into Renderly; upscale with the backend's
+                     own local engine instead (needs --upscale != off), by
+                     calling services/upscaler.py directly. Ignores
                      --channel/--project when set.
-  --flowbatch-dir <path>  FlowBatch checkout for --local-upscale (default:
-                     ..\..\FlowBatch next to this folder)
+  --upscaler-dir <path>  Renderly backend checkout for --local-upscale
+                     (default: ..\backend next to this folder)
   --prepare          Open/create the Flow project and upload refs; NEVER generates
   --report <path>    Atomic prepare report (frozen WhisperRadar contract, schema 1)
   --flow-project <url|name>  Flow project to open or create (NOT Renderly's --project)
@@ -1287,39 +1289,46 @@ async function downloadUrl(url, filePath) {
   fs.writeFileSync(filePath, Buffer.from(await res.arrayBuffer()));
 }
 
-// Renderly tier names ("off"/"HD"/"2K"/"4K") -> FlowBatch's own CLI names
-// ("off"/"1k"/"2k"/"4k").
-function flowbatchTierName(renderlyTier) {
-  const map = { off: "off", HD: "1k", "2K": "2k", "4K": "4k" };
-  return map[renderlyTier] || "off";
-}
+// Inline script run by the backend's own venv Python: import its already-
+// installed, already GPU/ICD-fixed local upscaler (services/upscaler.py)
+// directly and call it, rather than going through any HTTP route (every
+// route needs a channel/asset/generation id, which is exactly what
+// --local-upscale avoids). Run with cwd=<backend dir> so `from config
+// import ...` resolves the same way main.py's own imports do.
+const UPSCALE_PY = [
+  "import sys",
+  "from pathlib import Path",
+  "from services.upscaler import upscale",
+  "w, h = upscale(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3])",
+  "print(f'{w}x{h}')",
+].join("\n");
 
-// Upscale a saved PNG in place with FlowBatch's own local engine
+// Upscale a saved PNG in place with the Renderly backend's own local engine
 // (realesrgan-ncnn-vulkan, CPU Lanczos fallback) - no Renderly import, no
-// network call. Mirrors what `node <FlowBatch>/src/cli.js upscale <file>
-// --tier <t> --out <dir>` does on the command line: passing --out the
-// file's own directory makes it overwrite the original name in place,
-// exactly like Renderly's "upscaled in place" behavior above.
-function localUpscaleInPlace(filePath, renderlyTier, flowbatchDir) {
-  const tier = flowbatchTierName(renderlyTier);
-  if (tier === "off") return { skipped: "upscale off" };
-  const cli = path.join(flowbatchDir || DEFAULT_FLOWBATCH_DIR, "src", "cli.js");
-  if (!fs.existsSync(cli)) {
-    throw new Error(`FlowBatch not found at ${flowbatchDir || DEFAULT_FLOWBATCH_DIR} ` +
-                    `(set --flowbatch-dir)`);
+// HTTP call at all, just the same Python module main.py itself uses.
+// Written to a temp file first and renamed over the original so a failed
+// run never leaves a half-written PNG under the real name.
+function localUpscaleInPlace(filePath, tier, upscalerDir) {
+  if (!tier || tier === "off") return { skipped: "upscale off" };
+  const dir = upscalerDir || DEFAULT_BACKEND_DIR;
+  const py = path.join(dir, ".venv", "Scripts", "python.exe");
+  if (!fs.existsSync(py)) {
+    throw new Error(`Renderly backend venv not found at ${py} ` +
+                    `(set --upscaler-dir, or run backend's setup first)`);
   }
-  const args = ["upscale", filePath, "--tier", tier, "--out", path.dirname(filePath)];
-  const result = spawnSync(process.execPath, [cli, ...args], {
-    cwd: path.dirname(cli).replace(/[\\/]src$/, ""),
+  const tmpOut = `${filePath}.upscale-tmp.png`;
+  const result = spawnSync(py, ["-c", UPSCALE_PY, filePath, tmpOut, tier], {
+    cwd: dir,
     encoding: "utf8",
-    timeout: 180000,
+    timeout: 300000,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) {
+  if (result.status !== 0 || !fs.existsSync(tmpOut)) {
     const detail = (result.stderr || result.stdout || "").trim().slice(-400);
-    throw new Error(`FlowBatch upscale exited ${result.status}: ${detail}`);
+    throw new Error(`local upscale exited ${result.status}: ${detail}`);
   }
-  return { ok: true, tier, output: (result.stdout || "").trim() };
+  fs.renameSync(tmpOut, filePath);
+  return { ok: true, tier, size: (result.stdout || "").trim() };
 }
 
 // Never overwrite an existing output — earlier batches stay intact.
@@ -2829,12 +2838,12 @@ async function runFlowSession(page, opts, cards) {
         }
       }
     } else if (opts.localUpscale && opts.upscale && opts.upscale !== "off") {
-      // No Renderly channel: nothing gets imported. Upscale with FlowBatch's
-      // own local engine instead, straight on the saved file.
+      // No Renderly channel: nothing gets imported. Upscale with the
+      // backend's own local engine instead, straight on the saved file.
       try {
-        const info = localUpscaleInPlace(filePath, opts.upscale, opts.flowbatchDir);
+        const info = localUpscaleInPlace(filePath, opts.upscale, opts.upscalerDir);
         if (info.ok) {
-          console.log(`  upscaled locally (FlowBatch) → ${path.basename(filePath)}`);
+          console.log(`  upscaled locally (${info.size}) → ${path.basename(filePath)}`);
         }
       } catch (err) {
         console.log(`  ⚠ local upscale skipped: ${err.message}`);

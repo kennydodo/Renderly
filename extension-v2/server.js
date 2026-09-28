@@ -7,7 +7,7 @@
  * Endpoints:
  *   GET  /api/status  — { running, startedAt, currentCard, counts, log }
  *   GET  /api/config  — { shotlistPath, channel, refs, master, upscale,
- *                          localUpscale, flowbatchDir }
+ *                          localUpscale, upscalerDir }
  *   POST /api/config  — save config (JSON body)
  *   POST /api/start   — start a batch using the saved config
  *   POST /api/stop    — kill the running batch (process tree)
@@ -36,10 +36,10 @@ const DEFAULT_CONFIG = {
   master: "",
   upscale: "2K",
   // When true: never import results into a Renderly channel - flow.js
-  // upscales with FlowBatch's own local engine instead, and the /api/start
-  // "pick/validate a channel" step below is skipped entirely.
+  // upscales with the backend's own local engine instead, and the
+  // /api/start "pick/validate a channel" step below is skipped entirely.
   localUpscale: false,
-  flowbatchDir: "",
+  upscalerDir: "",
 };
 
 // Renderly output resolution tiers; legacy 2x/4x multipliers still accepted
@@ -114,8 +114,8 @@ function startRun(config, mode = "generate") {
     }
     if (config.localUpscale) {
       args.push("--local-upscale");
-      if ((config.flowbatchDir || "").trim()) {
-        args.push("--flowbatch-dir", config.flowbatchDir.trim());
+      if ((config.upscalerDir || "").trim()) {
+        args.push("--upscaler-dir", config.upscalerDir.trim());
       }
     }
   }
@@ -283,7 +283,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/config") {
       const body = await readBody(req);
       const config = loadConfig();
-      for (const key of ["shotlistPath", "outPath", "channel", "project", "flowProject", "refs", "master", "flowbatchDir"]) {
+      for (const key of ["shotlistPath", "outPath", "channel", "project", "flowProject", "refs", "master", "upscalerDir"]) {
         if (typeof body[key] === "string") config[key] = body[key];
       }
       if (typeof body.profileDir === "string") config.profileDir = body.profileDir.trim();
