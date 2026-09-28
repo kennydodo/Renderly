@@ -6,7 +6,8 @@
  *
  * Endpoints:
  *   GET  /api/status  — { running, startedAt, currentCard, counts, log }
- *   GET  /api/config  — { shotlistPath, channel, refs, master, upscale }
+ *   GET  /api/config  — { shotlistPath, channel, refs, master, upscale,
+ *                          localUpscale, upscalerDir }
  *   POST /api/config  — save config (JSON body)
  *   POST /api/start   — start a batch using the saved config
  *   POST /api/stop    — kill the running batch (process tree)
@@ -34,6 +35,11 @@ const DEFAULT_CONFIG = {
   ].join(","),
   master: "",
   upscale: "2K",
+  // When true: never import results into a Renderly channel - flow.js
+  // upscales with the backend's own local engine instead, and the
+  // /api/start "pick/validate a channel" step below is skipped entirely.
+  localUpscale: false,
+  upscalerDir: "",
 };
 
 // Renderly output resolution tiers; legacy 2x/4x multipliers still accepted
@@ -87,18 +93,30 @@ function startRun(config, mode = "generate") {
     mode === "prepare"
       ? // Prepare: open/create the Flow project and upload refs; never generates.
         ["--prepare", "--file", config.shotlistPath]
-      : ["--file", config.shotlistPath, "--channel", config.channel];
+      : ["--file", config.shotlistPath];
   if (mode === "prepare") {
     if ((config.reportPath || "").trim()) args.push("--report", config.reportPath.trim());
     if ((config.flowProject || "").trim()) args.push("--flow-project", config.flowProject.trim());
   } else {
+    // localUpscale means "never import" - channel/project only matter for
+    // import, so they are left out entirely (an empty --channel would still
+    // make flow.js skip import, but not passing it at all is clearer).
+    if (!config.localUpscale) {
+      args.push("--channel", config.channel);
+      if ((config.project || "").trim()) args.push("--project", config.project.trim());
+    }
     if ((config.flowProject || "").trim()) args.push("--flow-project", config.flowProject.trim());
-    if ((config.project || "").trim()) args.push("--project", config.project.trim());
     if ((config.refs || "").trim()) args.push("--refs", config.refs.trim());
     if ((config.master || "").trim()) args.push("--master", config.master.trim());
     if ((config.outPath || "").trim()) args.push("--out", config.outPath.trim());
     if (config.upscale !== undefined && config.upscale !== null) {
       args.push("--upscale", String(config.upscale));
+    }
+    if (config.localUpscale) {
+      args.push("--local-upscale");
+      if ((config.upscalerDir || "").trim()) {
+        args.push("--upscaler-dir", config.upscalerDir.trim());
+      }
     }
   }
   // Which Google account the batch runs as (config, not code).
@@ -265,20 +283,24 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/config") {
       const body = await readBody(req);
       const config = loadConfig();
-      for (const key of ["shotlistPath", "outPath", "channel", "project", "flowProject", "refs", "master"]) {
+      for (const key of ["shotlistPath", "outPath", "channel", "project", "flowProject", "refs", "master", "upscalerDir"]) {
         if (typeof body[key] === "string") config[key] = body[key];
       }
       if (typeof body.profileDir === "string") config.profileDir = body.profileDir.trim();
       if (typeof body.only === "string") config.only = body.only.trim();
       if (body.force !== undefined) config.force = Boolean(body.force);
       if (body.upscale !== undefined) config.upscale = normalizeUpscale(body.upscale);
+      if (body.localUpscale !== undefined) config.localUpscale = Boolean(body.localUpscale);
       saveConfig(config);
       return sendJson(res, 200, config);
     }
     if (req.method === "POST" && req.url === "/api/start") {
       await readBody(req);
       const config = loadConfig();
-      if (!(config.channel || "").trim()) {
+      if (config.localUpscale) {
+        // Local-upscale mode never touches a Renderly channel - nothing to
+        // pick or validate here, flow.js is told to skip import entirely.
+      } else if (!(config.channel || "").trim()) {
         // Fresh install / cleared channel: fall back to the first channel
         // that actually exists in this Renderly instead of a hardcoded name.
         try {
