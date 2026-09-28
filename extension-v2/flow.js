@@ -22,12 +22,17 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const crypto = require("crypto");
+const { spawnSync } = require("child_process");
 const { chromium } = require("playwright");
 
 const DEFAULT_BACKEND = "http://127.0.0.1:8022";
 const PROFILE_DIR = path.join(__dirname, "profile");
 const OUTPUT_DIR = path.join(__dirname, "output");
 const FLOW_URL = "https://flow.google.com/";
+// Sibling checkout of the FlowBatch CLI (../../FlowBatch from here), used
+// only when --local-upscale asks us to upscale without ever touching
+// Renderly - see localUpscaleInPlace().
+const DEFAULT_FLOWBATCH_DIR = path.join(__dirname, "..", "..", "FlowBatch");
 
 /** The profile folder to launch: --profile wins (relative to this folder). */
 function profileDirFor(opts) {
@@ -66,6 +71,8 @@ function parseArgs(argv) {
     profile: null, // profile folder override (default: ./profile)
     only: [], // render only these card names (e.g. the caller's missing list)
     force: false, // re-render cards whose output already exists
+    localUpscale: false, // upscale with FlowBatch's own engine, never Renderly
+    flowbatchDir: DEFAULT_FLOWBATCH_DIR,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -101,6 +108,8 @@ function parseArgs(argv) {
     else if (a === "--click-diag") opts.clickDiag = next();
     else if (a === "--drop-test") opts.dropTest = true;
     else if (a === "--import-only") opts.importOnly = true;
+    else if (a === "--local-upscale") opts.localUpscale = true;
+    else if (a === "--flowbatch-dir") opts.flowbatchDir = path.resolve(next());
     else if (a === "--browser") opts.browser = next();
     else if (a === "--help" || a === "-h") opts.help = true;
   }
@@ -121,6 +130,11 @@ Options:
   --master "<text>"  Style prefix prepended to every card prompt
   --channel <id>     Renderly channel id — results are imported via /api/channels/{id}/import
   --project <id/name> Renderly project inside the channel — imports land there
+  --local-upscale    Never import into Renderly; upscale with FlowBatch's own
+                     local engine instead (needs --upscale != off). Ignores
+                     --channel/--project when set.
+  --flowbatch-dir <path>  FlowBatch checkout for --local-upscale (default:
+                     ..\..\FlowBatch next to this folder)
   --prepare          Open/create the Flow project and upload refs; NEVER generates
   --report <path>    Atomic prepare report (frozen WhisperRadar contract, schema 1)
   --flow-project <url|name>  Flow project to open or create (NOT Renderly's --project)
@@ -1271,6 +1285,41 @@ async function downloadUrl(url, filePath) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
   fs.writeFileSync(filePath, Buffer.from(await res.arrayBuffer()));
+}
+
+// Renderly tier names ("off"/"HD"/"2K"/"4K") -> FlowBatch's own CLI names
+// ("off"/"1k"/"2k"/"4k").
+function flowbatchTierName(renderlyTier) {
+  const map = { off: "off", HD: "1k", "2K": "2k", "4K": "4k" };
+  return map[renderlyTier] || "off";
+}
+
+// Upscale a saved PNG in place with FlowBatch's own local engine
+// (realesrgan-ncnn-vulkan, CPU Lanczos fallback) - no Renderly import, no
+// network call. Mirrors what `node <FlowBatch>/src/cli.js upscale <file>
+// --tier <t> --out <dir>` does on the command line: passing --out the
+// file's own directory makes it overwrite the original name in place,
+// exactly like Renderly's "upscaled in place" behavior above.
+function localUpscaleInPlace(filePath, renderlyTier, flowbatchDir) {
+  const tier = flowbatchTierName(renderlyTier);
+  if (tier === "off") return { skipped: "upscale off" };
+  const cli = path.join(flowbatchDir || DEFAULT_FLOWBATCH_DIR, "src", "cli.js");
+  if (!fs.existsSync(cli)) {
+    throw new Error(`FlowBatch not found at ${flowbatchDir || DEFAULT_FLOWBATCH_DIR} ` +
+                    `(set --flowbatch-dir)`);
+  }
+  const args = ["upscale", filePath, "--tier", tier, "--out", path.dirname(filePath)];
+  const result = spawnSync(process.execPath, [cli, ...args], {
+    cwd: path.dirname(cli).replace(/[\\/]src$/, ""),
+    encoding: "utf8",
+    timeout: 180000,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim().slice(-400);
+    throw new Error(`FlowBatch upscale exited ${result.status}: ${detail}`);
+  }
+  return { ok: true, tier, output: (result.stdout || "").trim() };
 }
 
 // Never overwrite an existing output — earlier batches stay intact.
@@ -2778,6 +2827,17 @@ async function runFlowSession(page, opts, cards) {
         } catch (err) {
           console.log(`  ⚠ upscale skipped: ${err.message}`);
         }
+      }
+    } else if (opts.localUpscale && opts.upscale && opts.upscale !== "off") {
+      // No Renderly channel: nothing gets imported. Upscale with FlowBatch's
+      // own local engine instead, straight on the saved file.
+      try {
+        const info = localUpscaleInPlace(filePath, opts.upscale, opts.flowbatchDir);
+        if (info.ok) {
+          console.log(`  upscaled locally (FlowBatch) → ${path.basename(filePath)}`);
+        }
+      } catch (err) {
+        console.log(`  ⚠ local upscale skipped: ${err.message}`);
       }
     }
 

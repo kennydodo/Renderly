@@ -19,7 +19,7 @@ test("parseArgs takes --only and --force for resume runs", () => {
     FLOW_JS,
     "function normalizeUpscaleTier",
     "function usage",
-    { path, DEFAULT_BACKEND: "http://127.0.0.1:8022", OUTPUT_DIR: path.join(os.tmpdir(), "out") },
+    { path, DEFAULT_BACKEND: "http://127.0.0.1:8022", OUTPUT_DIR: path.join(os.tmpdir(), "out"), DEFAULT_FLOWBATCH_DIR: path.join(os.tmpdir(), "flowbatch") },
     ["parseArgs"],
     "parseArgs"
   );
@@ -234,7 +234,7 @@ test("the attach path cannot attach an unrelated asset", () => {
 
 test("attachRefs retries the whole search/upload cycle before failing", () => {
   const src = readFlow();
-  const fn = src.slice(src.indexOf("async function attachRefs"), src.indexOf("/**\n * Attach reference images as Flow ingredients - ONE picker session"));
+  const fn = src.slice(src.indexOf("async function attachRefs"), src.indexOf("async function trustedFill"));
   assert.ok(fn.length > 0, "attachRefs must exist");
   assert.match(fn, /for \(let pass = 1; pass <= 2/, "two full passes");
 });
