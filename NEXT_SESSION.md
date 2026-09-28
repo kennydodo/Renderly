@@ -93,3 +93,82 @@ as `skipped — already rendered (--force to redo)`, with **no `-1` duplicates**
 and the card that had failed (`S02_01_SCN_PR`, `BG_KITCHEN_01`) attached its two
 references cleanly. Suite green (49 tests).
 
+## 2026-09-28 — stage 7 unblocked; proposal: drop the Renderly import
+
+WhisperRadar production 2 (`Why Human Always Need To Pet Animal?`, render_mode
+`flow`, 153 images) failed the images stage (stage 7 of
+`style|script|audio|srt|shots|refs|images|merge|review`) twice. Both causes are
+fixed and it renders now:
+
+1. **Driver profile signed out.** `extension-v2/profile/` was created fresh at
+   13:13 that day and held 6 cookies, none of the Google auth set (`SID`,
+   `__Secure-1PSID`, `SAPISID`, `HSID`, `SSID`, `APISID`). Spawned by the
+   service there is no TTY, so `flow.js` threw `notSignedInError` instead of
+   pausing for a manual sign-in. Fix: `node flow.js --login` (the profile folder
+   is what selects the Google account).
+2. **No Renderly channel.** The 13:49 retry died before generating; the driver's
+   own log said `no channel named "The Nature Made Us" (have: )`.
+   `backend/renderly.db` is gitignored and was fresh on this machine:
+   `channels []`, `projects []`, `generations 0`. In `flow` mode nothing creates
+   the channel — `autorun._stage_params` passes `eff["renderly_channel_name"]`
+   straight through, and only the renderly/api path calls
+   `resolve_renderly_channel(..., create=True)` (`webapp.py:2199-2202`). Fix:
+   create the channel (`POST /api/channels {"name":"The Nature Made Us"}`) or
+   link it from the dashboard.
+
+Diagnostics needed for (2): the driver keeps its batch log **in memory only**.
+While the service runs, `GET http://127.0.0.1:8030/api/status` returns
+`{running, counts, exitCode, log}` — that is where the error text lives.
+`driver-service.log` only ever holds server.js's two startup lines. Also
+`GET /api/channels/<name>` answers **422**: `routes/channels.py:62` takes an int
+id, so flow.js's name probe always 422s and falls back to listing every channel.
+
+### Proposal: disable the Renderly import in the Flow driver
+
+**Agree.** WhisperRadar never reads the Renderly copy — the merge stage uses the
+production's own `images\` (`studio.find_images`), which the driver already
+writes. FlowBatch has no import at all, so the import is the one thing that
+makes a Renderly channel *mandatory* for a batch (cause 2 above) and it is what
+drives the `/api/channels/<name>` 422.
+
+**One caveat — the import is currently how the upscale happens.** `flow.js`
+applies the upscale to the imported record: `importToRenderly(...)` →
+`upscaleGeneration(opts.backend, record.id, tier)` →
+`POST /api/generations/{id}/upscale` → the upscaled `image_url` is downloaded
+back over the local PNG (`flow.js` ≈2757-2781 and ≈2321-2341). Neither upscale
+endpoint takes a file — `routes/assets.py:121` and `routes/generate.py:739` both
+need a record id — so dropping the import also drops driver upscaling unless it
+is replaced.
+
+Suggested order:
+
+1. Make the import opt-in: no `--channel` (or a new `--import`) means never touch
+   the backend; `--channel` keeps today's behaviour. That removes the channel
+   requirement for a plain batch and the 422 path.
+2. Move the upscale in-driver: run the vendored Real-ESRGAN ncnn-Vulkan engine on
+   the downloaded PNG and write it back in place, the way FlowBatch's
+   `src/upscale/` does. The engine and models are already in
+   `backend/tools/realesrgan/`, and the ICD bug that pinned it to CPU is fixed
+   (below).
+3. WhisperRadar: stop sending `flow_channel` for `engine=flow`
+   (`autorun._stage_params`, `autorun.py:1377`); keep it for the renderly/api
+   engine. `/api/upscale/status` stays for a manual upscale from the UI.
+
+If (2) is not wanted, the fallback is masters-only output from the driver with
+the upscale done elsewhere — but that must be explicit, not a silent regression.
+
+### Uncommitted changes from this session
+
+- `backend/services/upscaler.py`: ICD files whose driver is missing on this
+  machine are no longer forced into `VK_DRIVER_FILES` (the bundled
+  `nv-vk64.json` / `igvk64.json` carry another laptop's absolute DriverStore
+  paths, which made `vkCreateInstance` fail and every GPU probe look dead), and
+  the probe image is generated at 64×64 because the old 10×10 one failed
+  `_content_ok` even on a working GPU.
+- `backend/requirements.txt`: added `Pillow>=10` — the backend could not
+  `import main` without it.
+- `.gitignore` + untracked `backend/tools/realesrgan/device_cache.json` and
+  `_probe.png` (machine-specific, regenerated).
+- New tests: `tests/py/test_upscaler_icd.py`, `tests/py/test_upscaler_probe.py`
+  (backend suite 26 green). FlowBatch got the same ICD fix, uncommitted.
+
