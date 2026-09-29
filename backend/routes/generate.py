@@ -28,7 +28,7 @@ from services.gemini_client import QuotaExceededError
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
-AspectRatio = Literal["1:1", "16:9", "9:16", "4:3", "3:4"]
+AspectRatio = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "21:9"]
 RefStrength = Literal["loose", "balanced", "strict"]
 ImageSize = Literal["1K", "2K", "4K"]
 ResolutionTier = Literal["HD", "2K", "4K"]

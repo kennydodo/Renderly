@@ -1,4 +1,4 @@
-const ASPECTS = ["16:9", "1:1", "9:16", "4:3", "3:4"];
+const ASPECTS = ["16:9", "1:1", "9:16", "4:3", "3:4", "21:9"];
 const STRENGTHS = [
   ["balanced", "Balanced refs"],
   ["loose", "Loose refs"],
