@@ -1896,63 +1896,90 @@ async function locatorFor(page, candidates) {
 }
 
 /**
- * Set Flow's PROJECT-default aspect ratio (Settings -> "Image generation
- * default aspect ratio"). Automated Flow sessions run in Agent mode, where
- * the per-prompt settings overlay is hidden and only the project defaults
- * apply to what gets generated - the standalone FlowBatch driver found the
- * same thing for the same website, and the selectors below are ported from
- * its verified config/selectors.json (this driver had no aspect-ratio
- * control at all before). NOT independently verified against a live Flow
- * session from here - if the panel doesn't open or the selector text
- * doesn't match, run `node flow.js --diag` and adjust the selectors.
+ * Set Flow's aspect ratio for the shots about to be generated.
+ *
+ * Which control exists depends on Agent mode:
+ *   - Agent OFF: the composer's settings overlay carries an "Aspect ratio"
+ *     toggle. This is the path the standalone FlowBatch driver verified live
+ *     (button.settings-trigger-button -> flow-toggles[aria-label='Aspect
+ *     ratio']), and it is what a normal interactive session uses.
+ *   - Agent ON: that overlay is hidden and only the project defaults panel
+ *     applies (button[aria-label='Settings'] -> flow-toggles[aria-label=
+ *     'Image generation default aspect ratio']).
+ * Try the prompt-box overlay first, then fall back to the project panel.
  * Returns true on success (or if the ratio was already selected).
  */
+async function isToggleChecked(loc) {
+  const checked = await loc.getAttribute("aria-checked").catch(() => null);
+  if (checked === "true") return true;
+  const pressed = await loc.getAttribute("aria-pressed").catch(() => null);
+  return pressed === "true";
+}
+
 async function setProjectAspectRatio(page, ratio) {
-  const trigger = await locatorFor(page, [
-    "button[aria-label='Settings']",
-    "button[aria-label*='project settings' i]",
-  ]);
-  if (!trigger) {
-    console.log("  ⚠ could not find the project settings button - aspect ratio left as-is");
+  if (!ratio) return true;
+
+  const overlays = [
+    {
+      label: "prompt-box",
+      triggers: ["button.settings-trigger-button",
+        "button[aria-label='Settings trigger']"],
+      group: "flow-toggles[aria-label='Aspect ratio']",
+      panel: false,
+    },
+    {
+      label: "project",
+      triggers: ["button[aria-label='Settings']",
+        "button[aria-label*='project settings' i]"],
+      group: "flow-toggles[aria-label='Image generation default aspect ratio']",
+      panel: true,
+    },
+  ];
+
+  for (const overlay of overlays) {
+    const trigger = await locatorFor(page, overlay.triggers);
+    if (!trigger) continue;
+
+    let group = null;
+    for (let attempt = 0; attempt < 3 && !group; attempt++) {
+      await trigger.click({ force: true }).catch(() => {});
+      await sleep(1600);
+      group = await locatorFor(page, [overlay.group]);
+    }
+    if (!group) continue;
+
+    const option = group.locator(`button:has-text(${JSON.stringify(ratio)})`).first();
+    if ((await option.count().catch(() => 0)) === 0) {
+      console.log(`  ⚠ aspect ratio "${ratio}" is not offered by the ${overlay.label} `
+        + "controls - leaving it as-is");
+    } else if (!(await isToggleChecked(option))) {
+      await option.click().catch(() => {});
+      await sleep(400);
+    }
+
+    if (overlay.panel) {
+      const save = await locatorFor(page, ["button:text-is('Save')", "button:has-text('Save')"]);
+      if (save) await save.click().catch(() => {});
+      await sleep(1200);
+    }
+
+    // Close the overlay - it covers the composer.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (!(await locatorFor(page, [overlay.group]))) return true;
+      const close = await locatorFor(page, [
+        "button[aria-label='Back']",
+        "button[aria-label='Close']",
+        "button[aria-label*='close' i]",
+      ]);
+      if (close) await close.click({ force: true }).catch(() => {});
+      else await page.keyboard.press("Escape").catch(() => {});
+      await sleep(700);
+    }
+    console.log("  ⚠ the settings panel would not close - the composer may be covered");
     return false;
   }
 
-  const groupSelectors = ["flow-toggles[aria-label='Image generation default aspect ratio']"];
-  let group = null;
-  for (let attempt = 0; attempt < 3 && !group; attempt++) {
-    await trigger.click({ force: true }).catch(() => {});
-    await sleep(1600);
-    group = await locatorFor(page, groupSelectors);
-  }
-  if (!group) {
-    console.log("  ⚠ the project settings panel did not open - aspect ratio left as-is");
-    return false;
-  }
-
-  const option = group.locator(`button:has-text(${JSON.stringify(ratio)})`).first();
-  if ((await option.count().catch(() => 0)) === 0) {
-    console.log(`  ⚠ aspect ratio "${ratio}" is not offered here - leaving it as-is`);
-  } else {
-    await option.click().catch(() => {});
-    await sleep(400);
-    const save = await locatorFor(page, ["button:text-is('Save')", "button:has-text('Save')"]);
-    if (save) await save.click().catch(() => {});
-    await sleep(1200);
-  }
-
-  // Close the panel - it covers the composer.
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (!(await locatorFor(page, groupSelectors))) return true;
-    const close = await locatorFor(page, [
-      "button[aria-label='Back']",
-      "button[aria-label='Close']",
-      "button[aria-label*='close' i]",
-    ]);
-    if (close) await close.click({ force: true }).catch(() => {});
-    else await page.keyboard.press("Escape").catch(() => {});
-    await sleep(700);
-  }
-  console.log("  ⚠ the project settings panel would not close - the composer may be covered");
+  console.log("  ⚠ could not find a settings control for the aspect ratio - left as-is");
   return false;
 }
 
