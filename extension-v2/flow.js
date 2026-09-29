@@ -147,6 +147,27 @@ Options:
 // so multi-line "NAME.png …" prompts strip the token the same way.
 const NAME_TOKEN_RE = /^\s*([\w\-]+\.(?:png|jpe?g))\s+(.*)$/is;
 
+// Ideal aspect ratio per motion-code suffix on a shot's file name (mirrors
+// ImgToVideo.Cli export-batch's own table and WhisperRadar's FlowBatch job
+// builder - all three should agree). Flow's own project-settings toggle only
+// offers 16:9/4:3/1:1/3:4/9:16: anything this driver can't produce (21:9, for
+// PL/PR/PV) falls back to plain 16:9 rather than erroring.
+const MOTION_ASPECT = {
+  PL: "21:9", PR: "21:9", PV: "21:9",
+  PU: "1:1", PD: "1:1",
+};
+const FLOW_SUPPORTED_ASPECTS = new Set(["16:9", "4:3", "1:1", "3:4", "9:16"]);
+
+/** The aspect ratio this card should request, clamped to what Flow's own UI
+ * actually offers. Motion code is the last "_"-separated token of the card's
+ * name (its file stem), same convention as ImgToVideo.Cli/WhisperRadar. */
+function aspectForCard(card) {
+  const stem = String((card && card.name) || "").trim();
+  const motion = stem.includes("_") ? stem.split("_").pop() : stem;
+  const ideal = MOTION_ASPECT[motion] || "16:9";
+  return FLOW_SUPPORTED_ASPECTS.has(ideal) ? ideal : "16:9";
+}
+
 function stemName(value) {
   let v = String(value || "")
     .trim()
@@ -1865,6 +1886,76 @@ async function trustedFill(page, text) {
  * is why a card could sit "waiting for Flow" forever with nothing running.
  * This waits for the real button to enable and clicks it for real.
  */
+/** First selector (in order) that resolves to at least one element, or null. */
+async function locatorFor(page, candidates) {
+  for (const sel of candidates) {
+    const loc = page.locator(sel).first();
+    if ((await loc.count().catch(() => 0)) > 0) return loc;
+  }
+  return null;
+}
+
+/**
+ * Set Flow's PROJECT-default aspect ratio (Settings -> "Image generation
+ * default aspect ratio"). Automated Flow sessions run in Agent mode, where
+ * the per-prompt settings overlay is hidden and only the project defaults
+ * apply to what gets generated - the standalone FlowBatch driver found the
+ * same thing for the same website, and the selectors below are ported from
+ * its verified config/selectors.json (this driver had no aspect-ratio
+ * control at all before). NOT independently verified against a live Flow
+ * session from here - if the panel doesn't open or the selector text
+ * doesn't match, run `node flow.js --diag` and adjust the selectors.
+ * Returns true on success (or if the ratio was already selected).
+ */
+async function setProjectAspectRatio(page, ratio) {
+  const trigger = await locatorFor(page, [
+    "button[aria-label='Settings']",
+    "button[aria-label*='project settings' i]",
+  ]);
+  if (!trigger) {
+    console.log("  ⚠ could not find the project settings button - aspect ratio left as-is");
+    return false;
+  }
+
+  const groupSelectors = ["flow-toggles[aria-label='Image generation default aspect ratio']"];
+  let group = null;
+  for (let attempt = 0; attempt < 3 && !group; attempt++) {
+    await trigger.click({ force: true }).catch(() => {});
+    await sleep(1600);
+    group = await locatorFor(page, groupSelectors);
+  }
+  if (!group) {
+    console.log("  ⚠ the project settings panel did not open - aspect ratio left as-is");
+    return false;
+  }
+
+  const option = group.locator(`button:has-text(${JSON.stringify(ratio)})`).first();
+  if ((await option.count().catch(() => 0)) === 0) {
+    console.log(`  ⚠ aspect ratio "${ratio}" is not offered here - leaving it as-is`);
+  } else {
+    await option.click().catch(() => {});
+    await sleep(400);
+    const save = await locatorFor(page, ["button:text-is('Save')", "button:has-text('Save')"]);
+    if (save) await save.click().catch(() => {});
+    await sleep(1200);
+  }
+
+  // Close the panel - it covers the composer.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (!(await locatorFor(page, groupSelectors))) return true;
+    const close = await locatorFor(page, [
+      "button[aria-label='Back']",
+      "button[aria-label='Close']",
+      "button[aria-label*='close' i]",
+    ]);
+    if (close) await close.click({ force: true }).catch(() => {});
+    else await page.keyboard.press("Escape").catch(() => {});
+    await sleep(700);
+  }
+  console.log("  ⚠ the project settings panel would not close - the composer may be covered");
+  return false;
+}
+
 async function clickGenerate(page) {
   const btn = page
     .locator("button[aria-label='Start generation'], button.generate-icon-button")
@@ -2562,6 +2653,11 @@ async function runFlowSession(page, opts, cards) {
   let ok = 0;
   let failed = 0;
   let costUsd = 0;
+  // Tracks what the project's aspect-ratio default was last set to, so a run
+  // of same-motion cards (the common case) doesn't reopen the settings panel
+  // for every single one - only when the next card actually needs a
+  // different ratio.
+  let lastAspect = null;
 
   // One generation: fill prompt → attach refs → trigger → fetch/save/import.
   // Throws on failure; the batch loop catches and continues with the rest.
@@ -2580,6 +2676,18 @@ async function runFlowSession(page, opts, cards) {
     if (shouldSkipCard(opts, baseName)) {
       console.log(`  skipped — ${baseName}.png already rendered (--force to redo)`);
       return "skipped";
+    }
+
+    // PL/PR/PU/PD need overscan beyond plain 16:9 to actually pan instead of
+    // silently becoming a push-in (ImgToVideo's MotionEngine.PushInFallback);
+    // PU/PD's 1:1 is one of Flow's own native options.
+    const targetAspect = aspectForCard(card);
+    if (targetAspect !== lastAspect) {
+      const applied = await setProjectAspectRatio(page, targetAspect);
+      if (applied) {
+        lastAspect = targetAspect;
+        console.log(`  aspect ratio: ${targetAspect}`);
+      }
     }
 
     if (!composePrompt(opts, card).trim()) {
