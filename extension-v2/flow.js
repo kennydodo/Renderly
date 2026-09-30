@@ -163,6 +163,27 @@ Options:
 // so multi-line "NAME.png …" prompts strip the token the same way.
 const NAME_TOKEN_RE = /^\s*([\w\-]+\.(?:png|jpe?g))\s+(.*)$/is;
 
+// Ideal aspect ratio per motion-code suffix on a shot's file name (mirrors
+// ImgToVideo.Cli export-batch's own table and WhisperRadar's FlowBatch job
+// builder - all three should agree). Flow's own project-settings toggle only
+// offers 16:9/4:3/1:1/3:4/9:16: anything this driver can't produce (21:9, for
+// PL/PR/PV) falls back to plain 16:9 rather than erroring.
+const MOTION_ASPECT = {
+  PL: "21:9", PR: "21:9", PV: "21:9",
+  PU: "1:1", PD: "1:1",
+};
+const FLOW_SUPPORTED_ASPECTS = new Set(["16:9", "4:3", "1:1", "3:4", "9:16"]);
+
+/** The aspect ratio this card should request, clamped to what Flow's own UI
+ * actually offers. Motion code is the last "_"-separated token of the card's
+ * name (its file stem), same convention as ImgToVideo.Cli/WhisperRadar. */
+function aspectForCard(card) {
+  const stem = String((card && card.name) || "").trim();
+  const motion = stem.includes("_") ? stem.split("_").pop() : stem;
+  const ideal = MOTION_ASPECT[motion] || "16:9";
+  return FLOW_SUPPORTED_ASPECTS.has(ideal) ? ideal : "16:9";
+}
+
 function stemName(value) {
   let v = String(value || "")
     .trim()
@@ -1923,6 +1944,103 @@ async function trustedFill(page, text) {
  * is why a card could sit "waiting for Flow" forever with nothing running.
  * This waits for the real button to enable and clicks it for real.
  */
+/** First selector (in order) that resolves to at least one element, or null. */
+async function locatorFor(page, candidates) {
+  for (const sel of candidates) {
+    const loc = page.locator(sel).first();
+    if ((await loc.count().catch(() => 0)) > 0) return loc;
+  }
+  return null;
+}
+
+/**
+ * Set Flow's aspect ratio for the shots about to be generated.
+ *
+ * Which control exists depends on Agent mode:
+ *   - Agent OFF: the composer's settings overlay carries an "Aspect ratio"
+ *     toggle. This is the path the standalone FlowBatch driver verified live
+ *     (button.settings-trigger-button -> flow-toggles[aria-label='Aspect
+ *     ratio']), and it is what a normal interactive session uses.
+ *   - Agent ON: that overlay is hidden and only the project defaults panel
+ *     applies (button[aria-label='Settings'] -> flow-toggles[aria-label=
+ *     'Image generation default aspect ratio']).
+ * Try the prompt-box overlay first, then fall back to the project panel.
+ * Returns true on success (or if the ratio was already selected).
+ */
+async function isToggleChecked(loc) {
+  const checked = await loc.getAttribute("aria-checked").catch(() => null);
+  if (checked === "true") return true;
+  const pressed = await loc.getAttribute("aria-pressed").catch(() => null);
+  return pressed === "true";
+}
+
+async function setProjectAspectRatio(page, ratio) {
+  if (!ratio) return true;
+
+  const overlays = [
+    {
+      label: "prompt-box",
+      triggers: ["button.settings-trigger-button",
+        "button[aria-label='Settings trigger']"],
+      group: "flow-toggles[aria-label='Aspect ratio']",
+      panel: false,
+    },
+    {
+      label: "project",
+      triggers: ["button[aria-label='Settings']",
+        "button[aria-label*='project settings' i]"],
+      group: "flow-toggles[aria-label='Image generation default aspect ratio']",
+      panel: true,
+    },
+  ];
+
+  for (const overlay of overlays) {
+    const trigger = await locatorFor(page, overlay.triggers);
+    if (!trigger) continue;
+
+    let group = null;
+    for (let attempt = 0; attempt < 3 && !group; attempt++) {
+      await trigger.click({ force: true }).catch(() => {});
+      await sleep(1600);
+      group = await locatorFor(page, [overlay.group]);
+    }
+    if (!group) continue;
+
+    const option = group.locator(`button:has-text(${JSON.stringify(ratio)})`).first();
+    if ((await option.count().catch(() => 0)) === 0) {
+      console.log(`  ⚠ aspect ratio "${ratio}" is not offered by the ${overlay.label} `
+        + "controls - leaving it as-is");
+    } else if (!(await isToggleChecked(option))) {
+      await option.click().catch(() => {});
+      await sleep(400);
+    }
+
+    if (overlay.panel) {
+      const save = await locatorFor(page, ["button:text-is('Save')", "button:has-text('Save')"]);
+      if (save) await save.click().catch(() => {});
+      await sleep(1200);
+    }
+
+    // Close the overlay - it covers the composer.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (!(await locatorFor(page, [overlay.group]))) return true;
+      const close = await locatorFor(page, [
+        "button[aria-label='Back']",
+        "button[aria-label='Close']",
+        "button[aria-label*='close' i]",
+      ]);
+      if (close) await close.click({ force: true }).catch(() => {});
+      else await page.keyboard.press("Escape").catch(() => {});
+      await sleep(700);
+    }
+    console.log("  ⚠ the settings panel would not close - the composer may be covered");
+    return false;
+  }
+
+  console.log("  ⚠ could not find a settings control for the aspect ratio - left as-is");
+  return false;
+}
+
 async function clickGenerate(page) {
   const btn = page
     .locator("button[aria-label='Start generation'], button.generate-icon-button")
@@ -2620,6 +2738,11 @@ async function runFlowSession(page, opts, cards) {
   let ok = 0;
   let failed = 0;
   let costUsd = 0;
+  // Tracks what the project's aspect-ratio default was last set to, so a run
+  // of same-motion cards (the common case) doesn't reopen the settings panel
+  // for every single one - only when the next card actually needs a
+  // different ratio.
+  let lastAspect = null;
 
   // One generation: fill prompt → attach refs → trigger → fetch/save/import.
   // Throws on failure; the batch loop catches and continues with the rest.
@@ -2638,6 +2761,18 @@ async function runFlowSession(page, opts, cards) {
     if (shouldSkipCard(opts, baseName)) {
       console.log(`  skipped — ${baseName}.png already rendered (--force to redo)`);
       return "skipped";
+    }
+
+    // PL/PR/PU/PD need overscan beyond plain 16:9 to actually pan instead of
+    // silently becoming a push-in (ImgToVideo's MotionEngine.PushInFallback);
+    // PU/PD's 1:1 is one of Flow's own native options.
+    const targetAspect = aspectForCard(card);
+    if (targetAspect !== lastAspect) {
+      const applied = await setProjectAspectRatio(page, targetAspect);
+      if (applied) {
+        lastAspect = targetAspect;
+        console.log(`  aspect ratio: ${targetAspect}`);
+      }
     }
 
     if (!composePrompt(opts, card).trim()) {

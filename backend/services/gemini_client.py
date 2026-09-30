@@ -54,7 +54,7 @@ def generate_image(
 
     reference_images: optional list of (data, mime_type) tuples used as
     subject/style references for the model.
-    aspect_ratio: optional "1:1", "16:9", "9:16", "4:3", "3:4".
+    aspect_ratio: optional "1:1", "16:9", "9:16", "4:3", "3:4", "21:9".
     image_size: optional "1K", "2K", "4K".
 
     No automatic retries: a failed request is retried manually by the user.

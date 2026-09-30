@@ -14,7 +14,7 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 
-ASPECT_RATIOS = ("1:1", "16:9", "9:16", "4:3", "3:4")
+ASPECT_RATIOS = ("1:1", "16:9", "9:16", "4:3", "3:4", "21:9")
 DEFAULT_ASPECT_RATIO = "16:9"
 REF_STRENGTHS = ("loose", "balanced", "strict")
 
