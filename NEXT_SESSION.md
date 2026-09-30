@@ -1,5 +1,27 @@
 # Next session — handover
 
+## 2026-09-30 — DONE: Flow-driver aspect ratio, now with test coverage
+
+The aspect-ratio control added 2026-09-29 (`setProjectAspectRatio` in
+`extension-v2/flow.js`, merged via `feat/wide-aspect-ratios` -> `master` at
+`c42708b`) landed with NO automated test and, per its own commit message, had
+not been verified against a live Flow session. It has now been verified live
+by Kehinde (2026-09-29) and gained a real test file today:
+`tests/js/aspect-ratio.test.js` - `aspectForCard`'s PU/PD->1:1 (21:9 clamped to
+16:9 since Flow's own UI tops out there), `isToggleChecked`, and
+`setProjectAspectRatio`'s prompt-box-first/project-panel-fallback behaviour,
+including the failure paths (ratio not offered, panel won't close) that must
+degrade to "leave the aspect as-is" rather than crash a batch. Full JS suite:
+48/48 green.
+
+One behaviour worth knowing, pinned by the tests rather than changed: if the
+prompt-box overlay opens but does NOT offer the requested ratio, the function
+does not fall through to the project panel - it logs a warning and still
+closes/returns true, leaving whatever aspect was already set. In practice this
+hasn't mattered (both overlays offer the same 5 ratios), but it's why "falls
+back to the project panel" only happens when the prompt-box overlay is absent
+entirely (Agent mode), not when it's present but missing an option.
+
 Added 2026-09-24 from a WhisperRadar refs-stage test (three productions, one per
 channel). The refs stage itself works; the blocker is the `renderly` + `flow`
 engine, which runs through `extension-v2/flow.js`. It has not implemented what

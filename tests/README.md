@@ -16,6 +16,7 @@ before every commit (bypass a single commit with `git commit --no-verify`).
 | `tests/js/trigger.test.js` | `findGenerateButton` / `triggerGenerate` / `clickEl` really click Flow's button (the stall bug), rank candidates by specificity, fall back to Enter on the *live* editor, and fold same-origin iframe offsets into CDP coordinates |
 | `tests/js/tiers.test.js` | The dock speaks ImgToVideo's HD / 2K / 4K vocabulary and migrates legacy stored values (`1K` → HD, `2x/3x/4x` → tiers) |
 | `tests/js/driver-upscales.test.js` | `extension-v2` `flow.js` / `server.js` normalize `--upscale` / config values onto Renderly tiers, including WhisperRadar's 0-4 ints |
+| `tests/js/aspect-ratio.test.js` | `extension-v2/flow.js`'s Flow-driver aspect-ratio control: `aspectForCard`'s PU/PD->1:1 (21:9 clamped to 16:9), `isToggleChecked`, and `setProjectAspectRatio`'s prompt-box-first/project-panel-fallback behaviour and fail-soft close handling |
 | `tests/py/test_resolution.py` | Resolution preset math: 16:9 snaps to exact preset sizes, other ratios scale by short side, `classify_size` buckets (incl. native and legacy sizes), `resolve_tier`, `level_to_tier` |
 | `tests/py/test_api.py` | Settings roundtrip + old `upscale_level: 4` migration; the upscale API accepts `HD/2K/4K` and legacy `scale`, rejects `1K`/unknown tiers |
 
