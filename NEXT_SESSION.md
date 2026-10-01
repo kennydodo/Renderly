@@ -1,5 +1,23 @@
 # Next session — handover
 
+## 2026-10-01 — NEXT: WhisperRadar's KILL button drives this driver's /api/stop
+
+Agreed with Kehinde: the images stage gets a destructive Kill that never
+retries. This repo's half already exists and needs no change: `POST /api/stop`
+-> `stopRun()` taskkills the launched `flow.js` process tree
+(`taskkill /PID <child.pid> /T /F`, so Chrome dies with it) and returns
+`{stopped}`; WR's `studio.flow_stop()` already calls it. What is missing is all
+on the WhisperRadar side: setting its own job-cancel flag so the images
+pause/resume loop does not start round 2, covering the FlowBatch engine (kill
+the `node src/cli.js generate` tree) and the Renderly-API engine (kill the
+`dotnet run` ImageGen tree), and reporting what was killed. See WhisperRadar's
+AGENTS.md "NEXT SESSION — KILL button" for the full plan.
+
+Housekeeping while there: `extension-v2/.gitignore` should cover the generated
+artefacts that sit untracked here (`extension-v2.zip`, `flow-simple.js` +
+`.bak-*`, `profile-b/`, `profile-c/`, `profile-simple/`, `test/`, `*.png`
+screenshots) - they predate this work and were left alone deliberately.
+
 ## 2026-10-01 — DONE: /api/recover (adopt a stopped batch's gallery results)
 
 WhisperRadar's IMAGES-stage "Recover from Flow gallery" button now drives this
