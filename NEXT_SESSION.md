@@ -1,17 +1,19 @@
 # Next session — handover
 
-## 2026-10-01 — NEXT: WhisperRadar's KILL button drives this driver's /api/stop
+## 2026-10-01 — NEXT: the KILL switch uses ONE tree kill for both engines
 
 Agreed with Kehinde: the images stage gets a destructive Kill that never
-retries. This repo's half already exists and needs no change: `POST /api/stop`
--> `stopRun()` taskkills the launched `flow.js` process tree
-(`taskkill /PID <child.pid> /T /F`, so Chrome dies with it) and returns
-`{stopped}`; WR's `studio.flow_stop()` already calls it. What is missing is all
-on the WhisperRadar side: setting its own job-cancel flag so the images
-pause/resume loop does not start round 2, covering the FlowBatch engine (kill
-the `node src/cli.js generate` tree) and the Renderly-API engine (kill the
-`dotnet run` ImageGen tree), and reporting what was killed. See WhisperRadar's
-AGENTS.md "NEXT SESSION — KILL button" for the full plan.
+retries, implemented the SAME WAY for both engines - WhisperRadar performs one
+PID tree kill (`taskkill /PID <pid> /T /F`) with nothing engine-specific in the
+kill path. This repo's contribution is therefore just to expose the PID: add
+`pid: run && run.child ? run.child.pid : null` to `GET /api/status` (the run
+state already keeps `child`, server.js line ~81), so WhisperRadar kills the
+driver's `flow.js` tree with the exact same call it uses for FlowBatch's
+`node src/cli.js generate` tree and for the Renderly-API `dotnet run` tree.
+`POST /api/stop` -> `stopRun()` (already `taskkill /T /F`) stays as the fallback
+for when the PID cannot be read and for stopping batches from this driver's own
+UI. See WhisperRadar's AGENTS.md "NEXT SESSION - KILL switch, ONE mechanism for
+both engines" for the full plan.
 
 Housekeeping while there: `extension-v2/.gitignore` should cover the generated
 artefacts that sit untracked here (`extension-v2.zip`, `flow-simple.js` +
