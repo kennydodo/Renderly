@@ -10,6 +10,8 @@
  *                          localUpscale, upscalerDir }
  *   POST /api/config  — save config (JSON body)
  *   POST /api/start   — start a batch using the saved config
+ *   POST /api/prepare — open/create the Flow project, upload refs, report
+ *   POST /api/recover — adopt a stopped batch's gallery results (never generates)
  *   POST /api/stop    — kill the running batch (process tree)
  */
 
@@ -93,10 +95,14 @@ function startRun(config, mode = "generate") {
     mode === "prepare"
       ? // Prepare: open/create the Flow project and upload refs; never generates.
         ["--prepare", "--file", config.shotlistPath]
-      : ["--file", config.shotlistPath];
-  if (mode === "prepare") {
+      : mode === "recover"
+        ? // Recover: download a stopped batch's gallery results; never generates.
+          ["--recover", "--file", config.shotlistPath]
+        : ["--file", config.shotlistPath];
+  if (mode === "prepare" || mode === "recover") {
     if ((config.reportPath || "").trim()) args.push("--report", config.reportPath.trim());
     if ((config.flowProject || "").trim()) args.push("--flow-project", config.flowProject.trim());
+    if (mode === "recover" && (config.outPath || "").trim()) args.push("--out", config.outPath.trim());
   } else {
     // localUpscale means "never import" - channel/project only matter for
     // import, so they are left out entirely (an empty --channel would still
@@ -149,6 +155,7 @@ function startRun(config, mode = "generate") {
     const total = line.match(/^Batch: (\d+) card/);
     if (total) run.counts.total = Number(total[1]);
     if (line.includes("imported to Renderly")) run.counts.ok++;
+    if (run.mode === "recover" && line.includes("(recovered")) run.counts.ok++;
     if (/^\s*✕ /m.test(line)) run.counts.failed++;
   };
   readline.createInterface({ input: child.stdout }).on("line", push);
@@ -349,6 +356,21 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.flowProject === "string") config.flowProject = body.flowProject.trim();
       startRun(config, "prepare");
       return sendJson(res, 200, { started: true, mode: "prepare" });
+    }
+    if (req.method === "POST" && req.url === "/api/recover") {
+      // Manual gallery adoption for a stopped batch: open the Flow project,
+      // match its generated tiles to the shotlist, and download ONLY the
+      // missing outputs. Read-only against Flow - it never generates, never
+      // uploads, and never imports into Renderly.
+      const body = await readBody(req);
+      const config = loadConfig();
+      for (const key of ["shotlistPath", "reportPath", "outPath"]) {
+        if (typeof body[key] === "string" && body[key].trim()) config[key] = body[key].trim();
+      }
+      if (typeof body.flowProject === "string") config.flowProject = body.flowProject.trim();
+      if (typeof body.only === "string") config.only = body.only.trim();
+      startRun(config, "recover");
+      return sendJson(res, 200, { started: true, mode: "recover" });
     }
     if (req.method === "POST" && req.url === "/api/stop") {
       await readBody(req);

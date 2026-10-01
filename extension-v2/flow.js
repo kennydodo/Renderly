@@ -67,6 +67,7 @@ function parseArgs(argv) {
     timeout: 240000,
     master: "",
     prepare: false,
+    recover: false,
     report: null,
     flowProject: null, // Flow project URL or name (NOT Renderly's --project)
     profile: null, // profile folder override (default: ./profile)
@@ -94,6 +95,7 @@ function parseArgs(argv) {
         .filter(Boolean);
     else if (a === "--report") opts.report = path.resolve(next());
     else if (a === "--prepare") opts.prepare = true;
+    else if (a === "--recover") opts.recover = true;
     else if (a === "--backend") opts.backend = String(next()).replace(/\/+$/, "");
     else if (a === "--refs")
       opts.refs = String(next())
@@ -123,6 +125,7 @@ function usage() {
   node flow.js --file prompts.json [--channel 3] [--refs a.png,b.png]
   node flow.js --prompt "..." [--refs a.png] [--versions 2]
   node flow.js --prepare --file prompts.json --report <path>
+  node flow.js --recover --file shotlist.json --out <images dir> [--flow-project <url>] [--only a,b]
   node flow.js --diag
 
 Options:
@@ -138,6 +141,7 @@ Options:
   --upscaler-dir <path>  Renderly backend checkout for --local-upscale
                      (default: ..\backend next to this folder)
   --prepare          Open/create the Flow project and upload refs; NEVER generates
+  --recover          Adopt already-generated gallery results into --out; NEVER generates
   --report <path>    Atomic prepare report (frozen WhisperRadar contract, schema 1)
   --flow-project <url|name>  Flow project to open or create (NOT Renderly's --project)
   --profile <dir>    Chrome profile folder (default ./profile) — picks the Google account
@@ -601,6 +605,12 @@ async function installHelpers(page) {
           h: img.naturalHeight,
           canRedo,
           label: (img.getAttribute("alt") || "").trim(),
+          // The container's aria-label is the asset's display name: the
+          // prompt-derived title for a generation, the filename for an upload.
+          title:
+            tile && tile.getAttribute
+              ? String(tile.getAttribute("aria-label") || "").trim()
+              : "",
         });
       });
       return out;
@@ -867,6 +877,74 @@ async function installHelpers(page) {
       deepQueryAll("flow-grid-tile-container")
         .map((t) => t.getAttribute("aria-label") || "")
         .filter(Boolean);
+
+    // Scroll the gallery grid one page down (or back to the top) through its
+    // virtual scroller, crossing shadow hosts to find it. Returns whether the
+    // scroll position moved. Used by the recover sweep to mount every tile.
+    H.scrollGallery = (top) => {
+      const tiles = deepQueryAll("flow-grid-tile-container, flow-tile-container, flow-image-tile");
+      if (!tiles.length) return false;
+      let node = tiles[0];
+      let scroller = null;
+      while (node) {
+        const style = getComputedStyle(node);
+        if (
+          node.scrollHeight > node.clientHeight + 100 &&
+          /auto|scroll/.test(style.overflowY)
+        ) {
+          scroller = node;
+          break;
+        }
+        node =
+          node.assignedSlot ||
+          node.parentElement ||
+          (node.getRootNode() instanceof ShadowRoot ? node.getRootNode().host : null);
+      }
+      if (!scroller) scroller = document.scrollingElement || document.documentElement;
+      if (top) {
+        const was = scroller.scrollTop;
+        scroller.scrollTop = 0;
+        return scroller.scrollTop !== was;
+      }
+      const before = scroller.scrollTop;
+      scroller.scrollTop += Math.max(300, scroller.clientHeight * 0.8);
+      return scroller.scrollTop !== before;
+    };
+
+    // Read one tile's stored prompt by clicking ITS OWN "Reuse prompt"
+    // control (only generated tiles carry one) and waiting for the composer
+    // to repopulate. Nothing here submits: the caller must clear the composer
+    // again, one tile at a time, so no pending generation is ever left.
+    H.readTilePrompt = async (src) => {
+      const img = deepQueryAll("img").find((i) => (i.currentSrc || i.src) === src);
+      if (!img) return null;
+      const tile =
+        (img.closest &&
+          img.closest(
+            "flow-grid-tile-container, [role='listitem'], [role='option'], figure, li"
+          )) ||
+        img.parentElement;
+      if (!tile) return null;
+      let btn = tile.querySelector ? tile.querySelector("[aria-label*='Reuse prompt' i]") : null;
+      if (!btn) {
+        btn = Array.from(tile.querySelectorAll("button, [role='button']")).find((b) =>
+          /reuse prompt/i.test(
+            `${b.getAttribute("aria-label") || ""} ${b.getAttribute("title") || ""}`
+          )
+        );
+      }
+      if (!btn) return null;
+      img.scrollIntoView({ block: "center" });
+      btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      btn.click();
+      await new Promise((r) => setTimeout(r, 1500));
+      const input = getPromptInput();
+      if (!input) return "";
+      return String(input.innerText || input.textContent || input.value || "")
+        .replace(/\s+/g, " ")
+        .trim();
+    };
 
     // Robust "is this asset in the gallery?" check. Flow renders gallery
     // assets as BUTTONS whose accessible name is the asset name (textContent)
@@ -2344,6 +2422,248 @@ async function prepareSession(page, opts, cards) {
   );
 }
 
+/* ================= Recover (adopt gallery results, never generate) ================= */
+
+/**
+ * Adopt the images a broken batch already generated: Flow's gallery still
+ * holds the finished tiles, they were simply never downloaded. This mines the
+ * gallery, matches finished result tiles to the still-missing cards by
+ * prompt, and saves ONLY what is missing. It never clicks "Start generation",
+ * never types a prompt, and never uploads a reference - the manual IMAGES
+ * button on a WhisperRadar production is the caller (/api/recover).
+ */
+
+function normalizePromptText(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function commonPrefixLength(a, b) {
+  const max = Math.min(a.length, b.length);
+  let n = 0;
+  while (n < max && a[n] === b[n]) n++;
+  return n;
+}
+
+/**
+ * A generated tile's label is the prompt, auto-named and truncated: one
+ * normalised string must be a full prefix of the other across at least 20
+ * characters (shorter prompts must match exactly, so "Cat" can never claim
+ * the tile of "Cats resting by the fire").
+ */
+function labelMatchesPrompt(prompt, label) {
+  const a = normalizePromptText(prompt);
+  const b = normalizePromptText(label);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shared = commonPrefixLength(a, b);
+  return shared >= 20 && shared >= Math.min(a.length, b.length);
+}
+
+/**
+ * Label pass: claim tiles that name exactly one open card. A tile whose label
+ * could belong to two cards is never guessed - it waits for the redo-control
+ * read or the (strictly gated) order fallback.
+ */
+function planCardMatches(cards, tiles) {
+  const matches = [];
+  const claimedCards = new Set();
+  const claimedTiles = new Set();
+  for (const tile of tiles) {
+    if (claimedTiles.has(tile.src)) continue;
+    const labels = [tile.title, tile.label].filter(Boolean);
+    if (!labels.length) continue;
+    const hits = cards.filter(
+      (c) => !claimedCards.has(c.key) && labels.some((l) => labelMatchesPrompt(c.prompt, l))
+    );
+    if (hits.length !== 1) continue;
+    matches.push({ card: hits[0], tile, how: "label" });
+    claimedCards.add(hits[0].key);
+    claimedTiles.add(tile.src);
+  }
+  return {
+    matches,
+    restCards: cards.filter((c) => !claimedCards.has(c.key)),
+    restTiles: tiles.filter((t) => !claimedTiles.has(t.src)),
+  };
+}
+
+/**
+ * Reset the composer after a Recover-prompt read: dismiss overlays, detach
+ * any ingredients the click restored, and blank the text. Nothing is typed
+ * into the composer by this function.
+ */
+async function clearComposerAfterRead(page) {
+  await page.keyboard.press("Escape").catch(() => {});
+  await clearChipsTrusted(page).catch(() => {});
+  const input = page
+    .locator(
+      "flow-rich-text-editor .ProseMirror[contenteditable='true'], div.base-prompt-box div[contenteditable='true'], div[contenteditable='true']"
+    )
+    .first();
+  if ((await input.count().catch(() => 0)) > 0) {
+    await input.click({ timeout: 4000 }).catch(() => {});
+    await page.keyboard.press("Control+a").catch(() => {});
+    await page.keyboard.press("Delete").catch(() => {});
+  }
+  await sleep(300);
+}
+
+/** The recover run: mine the gallery, adopt the missing outputs, write the report. */
+async function recoverSession(page, opts, cards) {
+  await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
+  try {
+    await page.waitForURL(/accounts\.google\.(?:com|co)/, { timeout: 6000 });
+    console.log("\nSign-in required: log into Google in the opened browser window.");
+    await pause("Press Enter here after you are signed in…");
+    await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
+  } catch {
+    /* no sign-in redirect - the prompt-box check below verifies the state */
+  }
+  await installHelpers(page);
+
+  const target = String(opts.flowProject || "").trim();
+  if (target && /^https?:\/\//i.test(target)) {
+    console.log(`Opening Flow project ${target}`);
+    await page.goto(target, { waitUntil: "domcontentloaded" });
+    await sleep(3000);
+  } else {
+    if (!target) {
+      console.log(
+        "No --flow-project given: recovering from the project that is open or most recent - " +
+          "this may be another video's gallery."
+      );
+    }
+    await ensureFlowProject(page, target || null);
+  }
+  await sleep(1500);
+  await installHelpers(page);
+
+  const landed = /^https?:\/\//i.test(target) ? target : page.url();
+  if (!(await promptBoxReady(page, 15000))) {
+    if (!(process.stdin && process.stdin.isTTY)) throw notSignedInError(opts);
+    await pause("Sign into Google in the opened browser window, then press Enter…");
+    await page.goto(landed, { waitUntil: "domcontentloaded" });
+    await installHelpers(page);
+    if (!(await promptBoxReady(page, 60000))) throw notSignedInError(opts);
+  }
+
+  const url = page.url();
+  const report = {
+    schemaVersion: PREPARE_SCHEMA_VERSION,
+    projectUrl: url,
+    projectId: projectIdFrom(url),
+    outDir: opts.out,
+    recoveredAt: new Date().toISOString(),
+    alreadyPresent: [],
+    recovered: [],
+    stillMissing: [],
+  };
+  if (opts.report) writeReportAtomic(opts.report, report);
+
+  const wanted = [];
+  for (let ci = 0; ci < cards.length; ci++) {
+    const card = cards[ci];
+    const baseName = safeFileName(
+      card.name || splitPromptName(card.prompt).name || `card-${ci + 1}`
+    );
+    if (!cardInOnlyList(opts.only, card, ci)) continue;
+    if (cardOutputExists(opts.out, baseName)) {
+      report.alreadyPresent.push(baseName);
+      continue;
+    }
+    wanted.push({ key: baseName, card, prompt: composePrompt(opts, card) });
+  }
+  report.stillMissing = wanted.map((w) => w.key);
+  console.log(`Batch: ${wanted.length} card(s) to recover`);
+  if (opts.report) writeReportAtomic(opts.report, report);
+  if (!wanted.length) {
+    console.log("Recover finished - every card already has its output on disk.");
+    return report;
+  }
+
+  // The gallery is a virtual scroller: union every mounted tile across a
+  // page-down sweep. A tile can surface under two srcs when its thumbnail
+  // lazily loads; the finished-host filter keeps only the real one.
+  const bySrc = new Map();
+  for (let round = 0; round < 40; round++) {
+    const seen = await page
+      .evaluate(() => window.__renderly.collectTiles())
+      .catch(() => []);
+    for (const t of seen) if (t.src && !bySrc.has(t.src)) bySrc.set(t.src, t);
+    const moved = await page
+      .evaluate(() => window.__renderly.scrollGallery(false))
+      .catch(() => false);
+    if (!moved) break;
+    await sleep(700);
+  }
+  await page.evaluate(() => window.__renderly.scrollGallery(true)).catch(() => {});
+  const tiles = [...bySrc.values()].filter((t) => t.canRedo && isFinalResultUrl(t.src));
+  console.log(
+    `Gallery: ${tiles.length} generated result tile(s) found for ${wanted.length} missing card(s)`
+  );
+
+  let { matches, restCards, restTiles } = planCardMatches(wanted, tiles);
+
+  // Second pass: read the remaining tiles' full prompts through their own
+  // "Reuse prompt" control, clearing the composer again after every single
+  // read. Only run while cards are still open - each read costs seconds.
+  for (const tile of restTiles.slice()) {
+    if (!restCards.length) break;
+    const full = await page
+      .evaluate((src) => window.__renderly.readTilePrompt(src), tile.src)
+      .catch(() => null);
+    await clearComposerAfterRead(page);
+    if (!full) continue;
+    const hits = restCards.filter((w) => labelMatchesPrompt(w.prompt, full));
+    if (hits.length !== 1) continue;
+    matches.push({ card: hits[0], tile, how: "prompt-read" });
+    restCards = restCards.filter((w) => w.key !== hits[0].key);
+    restTiles = restTiles.filter((t) => t.src !== tile.src);
+  }
+
+  // Last resort: submission order, and only when it cannot be wrong by
+  // construction - equal counts and every remaining prompt distinct. The
+  // sweep collected newest-first, so pair oldest card with last tile.
+  if (
+    restCards.length &&
+    restCards.length === restTiles.length &&
+    new Set(restCards.map((w) => normalizePromptText(w.prompt))).size === restCards.length
+  ) {
+    const byAge = restTiles.slice().reverse();
+    console.log(
+      `  ⚠ ${restCards.length} card(s) matched by submission order - check these images`
+    );
+    restCards.forEach((w, i) => {
+      if (byAge[i]) matches.push({ card: w, tile: byAge[i], how: "order" });
+    });
+  }
+
+  fs.mkdirSync(opts.out, { recursive: true });
+  for (const m of matches) {
+    const fetched = await fetchResultBuffer(page, m.tile.src);
+    if (!fetched || !fetched.buffer) {
+      console.log(`  ✕ ${m.card.key}: tile found but its bytes could not be read`);
+      continue;
+    }
+    const filePath = path.join(opts.out, `${m.card.key}.png`);
+    fs.writeFileSync(filePath, fetched.buffer);
+    console.log(`  saved ${filePath} (recovered, via ${m.how})`);
+    report.recovered.push({ name: m.card.key, tile: fetched.src, how: m.how });
+  }
+  const done = new Set(report.recovered.map((r) => r.name));
+  report.stillMissing = wanted.map((w) => w.key).filter((k) => !done.has(k));
+  console.log(
+    `\nRecover finished — ${report.recovered.length} recovered, ` +
+      `${report.alreadyPresent.length} already present, ${report.stillMissing.length} still missing` +
+      `${opts.report ? ` · report: ${opts.report}` : ""}`
+  );
+  if (opts.report) writeReportAtomic(opts.report, report);
+  return report;
+}
+
 /** Sign a profile in once: open Flow and wait for the prompt box to appear. */
 async function loginSession(page, opts) {
   await page.goto(FLOW_URL, { waitUntil: "domcontentloaded" });
@@ -2402,6 +2722,18 @@ async function main() {
     const { context, page } = await launchChrome(opts);
     try {
       await prepareSession(page, opts, cards);
+    } finally {
+      await context.close().catch(() => {});
+    }
+    return;
+  }
+
+  if (opts.recover) {
+    // Read-only adoption: the gallery is mined, never fed. No channel, no
+    // backend, no upload, no generation.
+    const { context, page } = await launchChrome(opts);
+    try {
+      await recoverSession(page, opts, cards);
     } finally {
       await context.close().catch(() => {});
     }

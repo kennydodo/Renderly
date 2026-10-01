@@ -1,5 +1,26 @@
 # Next session — handover
 
+## 2026-10-01 — DONE: /api/recover (adopt a stopped batch's gallery results)
+
+WhisperRadar's IMAGES-stage "Recover from Flow gallery" button now drives this
+driver: `POST /api/recover` {shotlistPath, reportPath, outPath, flowProject,
+only} starts `flow.js --recover` (server.js mode "recover"), which opens the
+project, unions the virtualized gallery with `H.scrollGallery`, keeps finished
+result tiles (canRedo + isFinalResultUrl - uploads never carry the redo
+control), matches them to still-missing cards by the tile's prompt-derived
+`title`/alt label (>=20-char full prefix, never when ambiguous), falls back to
+reading each tile's own "Reuse prompt" control in the composer
+(`H.readTilePrompt` + `clearComposerAfterRead` after EVERY tile), then to
+submission order only when the counts agree and prompts are distinct - and
+writes ONLY the missing files under their exact shotlist names, plus the
+atomic report (`flow_driver_recover.json` on the WhisperRadar side). It never
+generates, uploads, or imports; recovered files are Flow masters (no
+upscale). `tests/js/recover.test.js` covers the CLI flag and the matcher
+(52/52 JS suite green). LIVE CALIBRATION still needed: the redo click
+repopulating the composer and the gallery scroller must be confirmed against
+a real signed-in Flow session before trusting `how:"prompt-read"`/`how:"order"`
+pairs (label matches are safe on their own).
+
 ## 2026-09-30 — DONE: Flow-driver aspect ratio, now with test coverage
 
 The aspect-ratio control added 2026-09-29 (`setProjectAspectRatio` in
