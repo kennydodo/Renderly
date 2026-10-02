@@ -2069,16 +2069,6 @@ function buildDock() {
     if (dockMaster) masterTa.value = dockMaster;
   });
 
-  const backendSetting = buildSettingItem("Renderly backend URL", [
-    backendInput,
-    backendSave,
-  ]);
-  const channelSetting = buildSettingItem("Renderly channel", channelSelect);
-  const presetSetting = buildSettingItem("Preset / template (adds to master)", [
-    presetSelect,
-    presetBtn,
-  ]);
-
   const scaleSelect = document.createElement("select");
   scaleSelect.style.cssText = selectStyle;
   UPSCALE_TIERS.forEach((tier) => {
@@ -2187,9 +2177,6 @@ function buildDock() {
 
   const diagSetting = buildSettingItem("Diagnose page", diagBtn);
 
-  settingsRow.appendChild(backendSetting.wrap);
-  settingsRow.appendChild(channelSetting.wrap);
-  settingsRow.appendChild(presetSetting.wrap);
   settingsRow.appendChild(versionsSetting.wrap);
   settingsRow.appendChild(scaleSetting.wrap);
   settingsRow.appendChild(retrySetting.wrap);
