@@ -1098,6 +1098,20 @@ async function installHelpers(page) {
   });
 }
 
+/** installHelpers runs once, right after the initial goto — but the Flow SPA
+ * navigates client-side and its own error/refresh handling reloads the page,
+ * which wipes window.__renderly. Without this, one refusal banner makes every
+ * following card die with "Cannot read properties of undefined (reading
+ * 'resetNewSrcs')" instead of failing on its own. installHelpers is already a
+ * no-op when the helper is present, so calling this per card is cheap. */
+async function ensureHelpers(page) {
+  const present = await page
+    .evaluate(() => typeof window.__renderly !== "undefined")
+    .catch(() => false);
+  if (!present) await installHelpers(page);
+  return present;
+}
+
 /* ================= Node-side helpers ================= */
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1548,7 +1562,9 @@ async function ensureRefsInGallery(page, refPaths) {
       mime: mimeOf(p),
       b64: fs.readFileSync(p).toString("base64"),
     }));
-    const up = await page.evaluate((pls) => window.__renderly.dropFiles(pls), payloads);
+    const up = await page
+      .evaluate((pls) => window.__renderly?.dropFiles?.(pls), payloads)
+      .catch(() => ({ ok: false }));
     if (!up.ok) return false;
     await sleep(2500);
   }
@@ -3095,6 +3111,11 @@ async function runFlowSession(page, opts, cards) {
       return "skipped";
     }
 
+    // The page may have navigated since the last card (Flow's refusal banner
+    // carries a refresh control), so make sure the page-side helper is back
+    // before touching anything.
+    await ensureHelpers(page);
+
     // PL/PR/PU/PD need overscan beyond plain 16:9 to actually pan instead of
     // silently becoming a push-in (ImgToVideo's MotionEngine.PushInFallback);
     // PU/PD's 1:1 is one of Flow's own native options.
@@ -3135,7 +3156,7 @@ async function runFlowSession(page, opts, cards) {
       filled = await trustedFill(page, composePrompt(opts, card));
     }
     if (!filled) {
-      filled = await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+      filled = await page.evaluate((t) => window.__renderly?.fillPrompt?.(t), composePrompt(opts, card)).catch(() => false);
     }
     console.log(filled ? "ok" : "FAILED (Flow may reuse its previous prompt)");
     if (!filled) {
@@ -3145,7 +3166,7 @@ async function runFlowSession(page, opts, cards) {
     // 1b. Reset the per-card observer so only URLs appearing from attach
     //     time onward register as new - sessionSeen already contains every
     //     result this session has ever saved or seen.
-    await page.evaluate(() => window.__renderly.resetNewSrcs());
+    await page.evaluate(() => window.__renderly?.resetNewSrcs?.()).catch(() => {});
 
     // 2. References — attached on EVERY card (and every version): Flow's
     //    composer wipe (select-all + insert on each fill) also clears the
@@ -3185,7 +3206,9 @@ async function runFlowSession(page, opts, cards) {
       if (!still) {
         console.log("  prompt lost in the picker — refilling…");
         if (!(await trustedFill(page, composePrompt(opts, card)))) {
-          await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+          await page
+            .evaluate((t) => window.__renderly?.fillPrompt?.(t), composePrompt(opts, card))
+            .catch(() => {});
         }
       }
     }
@@ -3222,7 +3245,9 @@ async function runFlowSession(page, opts, cards) {
         if (attempt < 4) {
           console.log(`  submit not enabled (attempt ${attempt}) — refilling prompt…`);
           if (!(await trustedFill(page, composePrompt(opts, card)))) {
-            await page.evaluate((t) => window.__renderly.fillPrompt(t), composePrompt(opts, card));
+            await page
+              .evaluate((t) => window.__renderly?.fillPrompt?.(t), composePrompt(opts, card))
+              .catch(() => {});
           }
           await sleep(2000);
         }
