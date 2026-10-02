@@ -399,6 +399,109 @@ function waitFor(check, timeoutMs, stepMs) {
   });
 }
 
+/* ================= Aspect ratio per shot (motion code) ================= */
+
+// Ideal aspect ratio per motion-code suffix on a shot's file name (the last
+// "_" token of "S02_05_PROC_PU"). Mirrors extension-v2/flow.js, ImgToVideo's
+// export-batch and WhisperRadar's FlowBatch job builder. Flow's own toggle only
+// offers 16:9/4:3/1:1/3:4/9:16, so PL/PR/PV (which want 21:9 for overscan)
+// stay 16:9 here - they render as push-ins - and only PU/PD change anything.
+const FLOW_MOTION_ASPECT = { PL: "21:9", PR: "21:9", PV: "21:9", PU: "1:1", PD: "1:1" };
+const FLOW_SUPPORTED_ASPECTS = new Set(["16:9", "4:3", "1:1", "3:4", "9:16"]);
+
+function aspectForName(name) {
+  const stem = String(name || "").trim();
+  const motion = stem.includes("_") ? stem.split("_").pop().toUpperCase() : stem.toUpperCase();
+  const ideal = FLOW_MOTION_ASPECT[motion] || "16:9";
+  return FLOW_SUPPORTED_ASPECTS.has(ideal) ? ideal : "16:9";
+}
+
+function firstVisible(selectors) {
+  for (const sel of selectors) {
+    const el = deepQueryAll(sel).find((e) => !isOurElement(e) && isVisible(e));
+    if (el) return el;
+  }
+  return null;
+}
+
+function isToggleOn(el) {
+  return (
+    el.getAttribute("aria-checked") === "true" ||
+    el.getAttribute("aria-pressed") === "true" ||
+    el.getAttribute("aria-selected") === "true"
+  );
+}
+
+// Select Flow's aspect ratio for the next generation. Agent OFF: the composer's
+// settings overlay carries an "Aspect ratio" toggle group. Agent ON: only the
+// project-defaults panel (with a Save button) applies. Resolves true when the
+// ratio is selected (or already was), false when no control could be used -
+// never throws, so a missing control degrades to "left as-is".
+async function setFlowAspectRatio(ratio) {
+  if (!ratio) return true;
+  const overlays = [
+    {
+      triggers: ["button.settings-trigger-button", "button[aria-label='Settings trigger']"],
+      group: "flow-toggles[aria-label='Aspect ratio']",
+      panel: false,
+    },
+    {
+      triggers: ["button[aria-label='Settings']"],
+      group: "flow-toggles[aria-label='Image generation default aspect ratio']",
+      panel: true,
+    },
+  ];
+  const groupEl = (sel) => deepQueryAll(sel).find((e) => !isOurElement(e)) || null;
+
+  for (const overlay of overlays) {
+    const trigger = firstVisible(overlay.triggers);
+    if (!trigger) continue;
+    let group = null;
+    for (let attempt = 0; attempt < 3 && !group; attempt++) {
+      clickEl(trigger);
+      await sleep(1200);
+      group = groupEl(overlay.group);
+    }
+    if (!group) continue;
+
+    const option = Array.from(group.querySelectorAll("button")).find(
+      (b) => (b.textContent || "").trim() === ratio || (b.textContent || "").includes(ratio)
+    );
+    if (!option) {
+      console.warn(`[Renderly] aspect ratio ${ratio} is not offered - leaving it as-is`);
+    } else if (!isToggleOn(option)) {
+      clickEl(option);
+      await sleep(400);
+    }
+    if (overlay.panel) {
+      const save = Array.from(document.querySelectorAll("button")).find(
+        (b) => (b.textContent || "").trim() === "Save"
+      );
+      if (save) clickEl(save);
+      await sleep(1000);
+    }
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (!groupEl(overlay.group)) return !!option;
+      const close = firstVisible([
+        "button[aria-label='Back']",
+        "button[aria-label='Close']",
+        "button[aria-label*='close' i]",
+      ]);
+      if (close) clickEl(close);
+      else
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await sleep(600);
+    }
+    console.warn("[Renderly] the settings panel would not close - the composer may be covered");
+    return false;
+  }
+  return false;
+}
+
+// What the settings last held during this run, so a run of same-motion cards
+// does not reopen the panel for every card. Reset at the start of a run.
+let lastFlowAspect = null;
+
 async function waitForNewImage(beforeSet, timeoutMs, onTick) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1697,6 +1800,15 @@ function buildDock() {
     card.displayName = cardName;
 
     setCardStatus(card.id, "Preparing…");
+
+    // The motion code on the shot name decides the ratio (PU/PD -> 1:1,
+    // everything else 16:9); only touch Flow's settings when it changes.
+    if (index === 0) lastFlowAspect = null;
+    const wantAspect = aspectForName(cardName);
+    if (wantAspect !== lastFlowAspect) {
+      setCardStatus(card.id, `Setting aspect ratio ${wantAspect}…`);
+      if (await setFlowAspectRatio(wantAspect)) lastFlowAspect = wantAspect;
+    }
 
     const versions = await getCardVersions();
     const labels = [];
