@@ -146,11 +146,23 @@ function startRun(config, mode = "generate") {
     exitCode: null,
   };
 
+  // Mirror the batch log to disk: this service keeps run.log in RAM only,
+  // so a stopped service (or a machine restart) used to take the real stop
+  // reason with it - production 12's batch ended at 7/64 images and left
+  // nothing behind. One file per batch, next to the config.
+  const stamp = run.startedAt.replace(/[:.]/g, "-").slice(0, 19);
+  run.logFile = fs.createWriteStream(
+    path.join(DIR, `batch-${run.mode}-${stamp}.log`),
+    { flags: "a" }
+  );
+  run.logFile.write(`=== ${run.mode} started ${run.startedAt} ===\n`);
+
   const push = (line) => {
     line = line.replace(/\s+$/, "");
     if (!line) return;
     run.log.push(line);
     if (run.log.length > 3000) run.log.splice(0, run.log.length - 3000);
+    if (run.logFile) run.logFile.write(line + "\n");
     if (line.startsWith("▶ ")) run.currentCard = line.slice(2).trim();
     const total = line.match(/^Batch: (\d+) card/);
     if (total) run.counts.total = Number(total[1]);
@@ -162,6 +174,11 @@ function startRun(config, mode = "generate") {
   readline.createInterface({ input: child.stderr }).on("line", push);
   child.on("exit", (code) => {
     run.exitCode = code;
+    if (run.logFile) {
+      run.logFile.end(
+        `=== ${run.mode} exited code ${code} at ${new Date().toISOString()} ===\n`
+      );
+    }
   });
 }
 
