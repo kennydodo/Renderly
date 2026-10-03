@@ -65,6 +65,7 @@ function parseArgs(argv) {
     out: OUTPUT_DIR,
     refs: [],
     timeout: 240000,
+    delaySeconds: 0, // extra wait between rendered cards (pacing)
     master: "",
     prepare: false,
     recover: false,
@@ -106,6 +107,7 @@ function parseArgs(argv) {
     else if (a === "--upscale") opts.upscale = normalizeUpscaleTier(next());
     else if (a === "--out") opts.out = path.resolve(next());
     else if (a === "--timeout") opts.timeout = Number(next()) || opts.timeout;
+    else if (a === "--delay") opts.delaySeconds = Math.max(0, Number(next()) || 0);
     else if (a === "--diag") opts.diag = true;
     else if (a === "--attach-diag") opts.attachDiag = true;
     else if (a === "--click-diag") opts.clickDiag = next();
@@ -154,6 +156,7 @@ Options:
   --backend <url>    Renderly backend (default ${DEFAULT_BACKEND})
   --out <dir>        Local download folder (default ./output)
   --timeout <ms>     Per-generation wait limit (default 240000)
+  --delay <seconds>  Extra wait after each rendered card, to pace the account (default 0)
   --browser <name>   chrome (default) or chromium
   --diag             Print Flow page diagnostics and exit
   --attach-diag      Click the ingredient control, dump what opens, exit
@@ -2893,6 +2896,9 @@ async function launchChrome(opts) {
     headless: false,
     viewport: null,
     chromiumSandbox: true, // avoids Chrome's "--no-sandbox unsupported" warning bar
+    // Playwright's default --enable-automation sets navigator.webdriver and
+    // shows the "controlled by automated software" bar; drop it.
+    ignoreDefaultArgs: ["--enable-automation"],
     args: [
       "--start-maximized",
       "--disable-blink-features=AutomationControlled",
@@ -3358,8 +3364,10 @@ async function runFlowSession(page, opts, cards) {
       continue;
     }
     for (let v = 0; v < versions; v++) {
+      let skippedLast = false; // an already-rendered card needs no pacing wait
       try {
         const outcome = await runVersion(card, ci, v);
+        skippedLast = outcome === "skipped";
         if (outcome === "skipped") skipped++;
         else ok++;
       } catch (err) {
@@ -3373,6 +3381,10 @@ async function runFlowSession(page, opts, cards) {
         }
       }
       await sleep(1500);
+      if (opts.delaySeconds > 0 && !skippedLast) {
+        console.log(`  … pacing: waiting ${opts.delaySeconds}s before the next card`);
+        await sleep(opts.delaySeconds * 1000);
+      }
     }
   }
 
